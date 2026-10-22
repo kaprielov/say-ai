@@ -42,6 +42,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run db:check` | Check connection, pgvector, and application tables. |
 | `npm run test:db` | Verify schema constraints and vector retrieval against the migrated database. Fixtures are rolled back. |
 | `npm run test:api` | Test authentication, validation, persistence, owner isolation, and atomic creation in a temporary database. Requires database creation permission, available with the local Compose user. |
+| `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
 
 Compose stores database files in a named volume. Normal stops and restarts preserve it. Run migrations explicitly; application startup does not modify the schema.
 
@@ -82,7 +83,32 @@ Errors use a common shape:
 {"error":{"code":"unauthorized","message":"A valid bearer API key is required."}}
 ```
 
-Submissions currently remain pending: background ingestion and querying have not been implemented yet.
+## Background ingestion
+
+Set `OPENAI_API_KEY` in `.env` or the shell to enable the worker, then start the application with `npm run dev` or `npm start`. This is the provider credential; it is separate from `DEVELOPER_API_KEY`, which authenticates callers of this API. Leave `OPENAI_API_KEY` empty to run the API without ingestion. `INGESTION_ENABLED=false` explicitly pauses the worker; `INGESTION_ENABLED=true` requires a provider key.
+
+The worker polls once per second while idle and processes one task at a time inside the application. An exclusive PostgreSQL advisory lock prevents two application instances from running ingestion and startup recovery against the same database. A worker database failure shuts down the application with a nonzero exit code; restart it to recover durable work.
+
+1. Claim a pending task and persist the incremented attempt count with an isolated content version.
+2. Split source text into chunks of at most 512 `cl100k_base` tokens with an overlap of up to 64 tokens. Chunks remain exact source substrings, including Unicode characters and whitespace within usable chunks. Whitespace-only chunks are omitted.
+3. Embed batches of at most 16 chunks, sequentially, and save their text, token counts, positions, and vectors under the isolated version.
+4. After every batch succeeds, mark the version ready, switch the active version, and complete the task in one transaction.
+
+Defaults are `EMBEDDING_MODEL=text-embedding-3-small` and `EMBEDDING_DIMENSIONS=1536`. The adapter also supports `text-embedding-3-large`, with up to 3072 dimensions; the small model supports up to 1536. See the [official OpenAI embeddings guide](https://developers.openai.com/api/docs/guides/embeddings). The configured model, dimensions, and chunking settings are stored per version. Changing configuration affects future ingestions; existing embeddings are retained.
+
+Each provider request has a 30-second timeout, and each ingestion attempt has a ten-minute deadline. Transient failures retry from the beginning after 10 seconds, then 60 seconds, with a maximum of three persisted attempts total. Permanent provider errors such as invalid credentials or invalid requests fail immediately. No additional retries happen inside the provider adapter. Stored errors use sanitized codes and messages, without provider response bodies or source text.
+
+Partial failed versions are removed. Shutdown attempts to cancel the current provider call; its unfinished task remains durable. On restart, interrupted attempts count toward the limit, incomplete versions are removed, and eligible work restarts from the beginning. A third interrupted attempt becomes failed. Previous successful versions remain available and are never removed by this cleanup. Cancellation may not stop provider-side execution or charges.
+
+With ingestion enabled, poll `GET /knowledge-bases/<uuid>` until `status` becomes `ready` or `failed`. A ready knowledge base reports `queryable: true`; question answering will be implemented in the next step. Query availability here means prepared content exists, rather than that a query endpoint has already been implemented.
+
+To run the optional live test, which makes a paid OpenAI embeddings request using a short synthetic source in a temporary database:
+
+```sh
+RUN_LIVE_EMBEDDING_TEST=true node --env-file=.env --import tsx --test --test-name-pattern='real OpenAI' tests/ingestion.test.mjs
+```
+
+The one-hour ingestion target still needs representative volume and provider-rate-limit measurements.
 
 ## Database model
 
@@ -93,8 +119,8 @@ Submissions currently remain pending: background ingestion and querying have not
 
 Vectors use the dimension-independent `vector` type so model selection remains open. Each version specifies its dimensions; foreign keys and checks prevent mismatched chunks. Retrieval will use exact cosine search, scoped to a version, without an approximate vector index initially. See the [pgvector documentation](https://github.com/pgvector/pgvector) for variable-dimension storage and search.
 
-Foreign keys also prevent attaching another knowledge base's task or active version. The future ingestion service must activate only ready versions and update task completion atomically. It must increment attempts before work, schedule retries, and maintain `updated_at`; the schema does not implement that workflow.
+Foreign keys also prevent attaching another knowledge base's task or active version. The ingestion processor activates ready versions and updates task completion atomically. It increments attempts before work, schedules retries, and maintains `updated_at` for task and activation changes; these transitions are application logic rather than database triggers.
 
 Migrations use [node-pg-migrate](https://salsita.github.io/node-pg-migrate/) and run transactionally. The initial rollback retains the `vector` extension but removes the four application tables.
 
-The current application provides the health endpoint, database foundation, single-developer authentication, and knowledge-base creation/status. Ingestion and answering are the next implementation steps. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).
+The current application provides the health endpoint, database foundation, single-developer authentication, knowledge-base creation/status, and background ingestion. Querying and the content-replacement endpoint are the next implementation steps. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).

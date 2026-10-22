@@ -13,13 +13,15 @@
     "db:rollback": "node --env-file-if-exists=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js down 1",
     "db:check": "node --env-file-if-exists=.env --import tsx scripts/check-db.ts",
     "test:db": "node --env-file-if-exists=.env --test tests/database.test.mjs",
-    "test:api": "node --env-file-if-exists=.env --import tsx --test tests/api.test.mjs"
+    "test:api": "node --env-file-if-exists=.env --import tsx --test tests/api.test.mjs",
+    "test:ingestion": "node --env-file-if-exists=.env --import tsx --test tests/ingestion.test.mjs"
   },
   "engines": {
     "node": ">=22.13.0"
   },
   "dependencies": {
     "express": "^5.3.0",
+    "js-tiktoken": "^1.0.21",
     "pg": "^8.23.1"
   },
   "devDependencies": {

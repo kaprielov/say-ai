@@ -4,6 +4,14 @@ Status: MVP requirements, API draft, data flows, recovery policy, query limits, 
 
 Updated: 22 October 2026.
 
+### Current implementation
+
+The API now uses Node.js, TypeScript, Express, and PostgreSQL with pgvector. It supports API-key authentication, owner-scoped knowledge-base creation/status, and background ingestion within one application instance. The remaining sections preserve the design discussion; suggestions below are not all implemented.
+
+Ingestion uses OpenAI `text-embedding-3-small` with 1536 dimensions by default, configurable for future versions. It chunks with `cl100k_base` into up to 512 tokens with up to 64 tokens of overlap, embeds sequential batches of 16, and stores model/dimensions/configuration with each attempt version. Activation and task completion commit atomically. An exclusive database advisory lock protects startup recovery and enforces a single ingestion worker. Partial failed versions are deleted; successful versions are retained.
+
+Transient ingestion failures allow three persisted attempts total, separated by 10 seconds and 60 seconds. Interrupted attempts count toward that total; permanent provider errors fail immediately. Each provider request is bounded by 30 seconds and each attempt by ten minutes. These are implementation defaults, not evidence that the one-hour freshness target has been met. Real workload quality, freshness, and query latency remain to be evaluated. The query and content-replacement endpoints are not implemented yet.
+
 ## 1. Context and scope
 
 Build a RAG service with an API that developers can use to create chatbots without implementing the retrieval and generation infrastructure themselves. Use this project to practise system design while building the service.
