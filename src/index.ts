@@ -1,12 +1,17 @@
-import express from 'express';
+import { createApp } from './app.js';
+import { config, readAuthConfig } from './config.js';
+import { pool } from './db.js';
 
-const app = express();
-const port = Number(process.env.PORT ?? 3000);
+const app = createApp({ pool, ...readAuthConfig() });
 
-app.get('/health', (_request, response) => {
-  response.json({ status: 'ok' });
+const server = app.listen(config.port, () => {
+  console.log(`Server listening on http://localhost:${config.port}`);
 });
 
-app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
-});
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    server.close(() => {
+      void pool.end();
+    });
+  });
+}
