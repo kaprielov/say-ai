@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import { IngestionProcessor } from './processor.js';
 import type { Embedder } from './embeddings.js';
 
-export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void) {
+export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void, ownerEmbedder?: (owner: string) => Promise<Embedder>) {
   const client = await pool.connect();
   const controller = new AbortController();
   let failed = false;
@@ -24,7 +24,7 @@ export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFai
     throw error;
   }
 
-  const processor = new IngestionProcessor(client, embedder);
+  const processor = new IngestionProcessor(client, embedder, undefined, ownerEmbedder);
   const running = (async () => {
     try {
       while (!controller.signal.aborted) {

@@ -1,3 +1,4 @@
+import { startTyping } from '../src/telegram/typing.ts';
 import { QueryError } from '../src/queries/errors.ts';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -8,6 +9,7 @@ import { after, before, test } from 'node:test';
 import pg from 'pg';
 import { createApp } from '../src/app.ts';
 import { TelegramService } from '../src/telegram/service.ts';
+import { managerIntroduction, managerHelp, russianManagerIntroduction, russianManagerHelp } from '../src/telegram/guide.ts';
 import { encryptToken, decryptToken, TelegramError } from '../src/telegram/client.ts';
 import { processUpdate, processOutbox, notifyIngestion, startTelegramWorker, refreshWebhooks } from '../src/telegram/worker.ts';
 
@@ -306,7 +308,7 @@ async function lastReply(user) {
 test('new users choose a language before management actions and invalid language callbacks do not advance', async () => {
   await deliver(message(30, '/start'));
   let reply = await lastReply(30);
-  assert.deepEqual(reply.reply_markup.inline_keyboard[0].map(button => button.callback_data), ['lang:en', 'lang:ru']);
+  assert.deepEqual(reply.reply_markup.inline_keyboard[0].map(button => button.callback_data), ['lang:ru', 'lang:en']);
   await deliver(callback(30, 'new'));
   assert.equal((await lastReply(30)).text, reply.text);
   await deliver(callback(30, 'lang:de'));
@@ -346,7 +348,7 @@ test('Russian preference survives workflow changes and restart; notifications an
 
 test('language can be changed from the menu or command, without affecting another user', async () => {
   await deliver(message(30, '/language'));
-  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][1].text, 'Русский');
+  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'Русский');
   await deliver(callback(30, 'lang:en'));
   assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'Create knowledge base');
   await deliver(callback(30, 'language'));
@@ -354,4 +356,122 @@ test('language can be changed from the menu or command, without affecting anothe
   await deliver(message(11, '/start'));
   assert.equal((await lastReply(11)).text, 'Manage your knowledge bases and Telegram bots.');
   assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 11')).rows[0].language, 'en');
+});
+
+
+test('help is available without a key, preserves input state, and routes each topic', async () => {
+  const original = service;
+  service = new TelegramService(pool, config, api, questions, {
+    async available() { return false; },
+    async stored() { return false; },
+  });
+  try {
+    await deliver(message(11, '/start'));
+    const replies = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id' = '11' ORDER BY id DESC LIMIT 2")).rows;
+    assert.match(replies[0].payload.text, /Connect your OpenAI/);
+    assert.equal(replies[1].payload.text, managerIntroduction);
+    assert.equal(replies[1].payload.reply_markup, undefined);
+    assert.ok(!replies[0].payload.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'new'));
+    await service.session(db, 11, 'upload', null, 'Draft to keep');
+    await deliver(message(11, '/help'));
+    assert.equal((await lastReply(11)).text, managerHelp.menu);
+    for (const topic of Object.keys(managerHelp)) {
+      await deliver(callback(11, `help:${topic}`));
+      const reply = await lastReply(11);
+      assert.equal(reply.text, managerHelp[topic]);
+      assert.ok(reply.text.length < 4000);
+      assert.ok(reply.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'menu'));
+    }
+    await deliver(callback(11, 'help:unknown'));
+    assert.equal((await lastReply(11)).text, managerHelp.menu);
+    const session = (await pool.query('SELECT state, draft_name FROM telegram_sessions WHERE user_id = 11')).rows[0];
+    assert.deepEqual(session, { state: 'upload', draft_name: 'Draft to keep' });
+    await deliver(callback(11, 'new'));
+    assert.match((await lastReply(11)).text, /Connect your OpenAI/);
+    await deliver(message(11, '/cancel'));
+    assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id = 11')).rows[0].state, 'menu');
+  } finally { service = original; }
+});
+
+test('knowledge base and bot cards offer the matching help topic', async () => {
+  const base = (await pool.query("SELECT id FROM knowledge_bases WHERE owner_id = 'telegram:15' LIMIT 1")).rows[0];
+  await deliver(callback(15, `kb:${base.id}`));
+  assert.ok((await lastReply(15)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'help:base'));
+  await deliver(callback(16, 'bot:200'));
+  assert.ok((await lastReply(16)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'help:bot'));
+});
+
+
+test('manager introduction and every help topic follow the selected language', async () => {
+  for (const language of ['ru', 'en']) {
+    await deliver(callback(30, `lang:${language}`));
+    const menu = await lastReply(30);
+    assert.equal(menu.text, language === 'ru' ? 'Управляйте базами знаний и Telegram-ботами.' : 'Manage your knowledge bases and Telegram bots.');
+    const welcome = (await pool.query("SELECT payload FROM telegram_outbox WHERE method = 'sendMessage' AND payload->>'chat_id' = '30' ORDER BY id DESC LIMIT 1 OFFSET 1")).rows[0].payload;
+    assert.equal(welcome.text, language === 'ru' ? russianManagerIntroduction : managerIntroduction);
+    assert.equal(welcome.reply_markup, undefined);
+    assert.equal(menu.reply_markup.inline_keyboard.at(-1)[0].text, language === 'ru' ? 'Справка' : 'Help');
+    await service.session(db, 30, 'name');
+    for (const topic of Object.keys(managerHelp)) {
+      await deliver(callback(30, `help:${topic}`));
+      const reply = await lastReply(30);
+      assert.equal(reply.text, language === 'ru' ? russianManagerHelp[topic] : managerHelp[topic]);
+      assert.ok(reply.text.length < 4000);
+      assert.equal(reply.reply_markup.inline_keyboard[0][0].text, language === 'ru' ? 'Справка по менеджеру' : 'Manager help');
+    }
+    assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id = 30')).rows[0].state, 'name');
+  }
+});
+
+test('manager defaults to Russian when no language preference has been saved', async () => {
+  const t = await service.locale(db, 987654);
+  assert.equal(t(managerIntroduction), russianManagerIntroduction);
+  assert.equal((await service.localeFromPool(987654))('Help'), 'Справка');
+});
+
+
+test('typing refreshes during a slow answer and stops after completion', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const actions = [];
+  const transport = { async call(...args) { actions.push(args); } };
+  const stop = startTyping(transport, Promise.resolve('200:child'), 999);
+  await new Promise(setImmediate);
+  assert.deepEqual(actions, [['200:child', 'sendChatAction', { chat_id: 999, action: 'typing' }]]);
+  t.mock.timers.tick(4000);
+  await new Promise(setImmediate);
+  assert.equal(actions.length, 2);
+  stop();
+  t.mock.timers.tick(12000);
+  await new Promise(setImmediate);
+  assert.equal(actions.length, 2);
+});
+
+test('typing errors are ignored and stopped actions do not send late or overlap', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let count = 0;
+  const stopFailed = startTyping({ async call() { count++; throw new TelegramError(429, 30); } }, Promise.resolve('100:manager'), 10);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(40000);
+  await new Promise(setImmediate);
+  assert.equal(count, 1);
+  stopFailed();
+
+  let resolveToken;
+  const stopPending = startTyping({ async call() { count++; } }, new Promise(resolve => { resolveToken = resolve; }), 10);
+  stopPending();
+  resolveToken('100:manager');
+  await new Promise(setImmediate);
+  assert.equal(count, 1);
+
+  let finish;
+  const stopSlow = startTyping({ async call() { count++; await new Promise(resolve => { finish = resolve; }); } }, Promise.resolve('100:manager'), 10);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(12000);
+  assert.equal(count, 2);
+  stopSlow();
+  finish();
+  await new Promise(setImmediate);
+  t.mock.timers.tick(12000);
+  await new Promise(setImmediate);
+  assert.equal(count, 2);
 });

@@ -1,4 +1,7 @@
+import type { OwnerCredentials } from '../providers/owner-openai.js';
 import { translator, type Language } from './i18n.js';
+import { startTyping } from './typing.js';
+import { managerHelp, managerIntroduction, type HelpTopic } from './guide.js';
 import { randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { createKnowledgeBase, replaceKnowledgeBase } from '../knowledge-bases/service.js';
@@ -12,7 +15,7 @@ export type TelegramConfig = {
 };
 type User = { id: number; is_bot?: boolean; username?: string };
 type Message = {
-  chat: { id: number; type: string }; from?: User; text?: string;
+  chat: { id: number; type: string }; from?: User; text?: string; message_id?: number; key_redacted?: boolean;
   document?: { file_id: string; file_name?: string; file_size?: number };
 };
 export type Update = {
@@ -27,16 +30,37 @@ const ownerId = (id: number) => `telegram:${id}`;
 const buttons = (rows: [string, string][][]) => ({ inline_keyboard: rows.map(row => row.map(([text, callback_data]) => ({ text, callback_data }))) });
 
 export class TelegramService {
-  constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>) {}
+  constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>, readonly credentials?: OwnerCredentials) {}
 
   async locale(db: PoolClient, user: number | string) {
     const row = (await db.query<{ language: Language | null }>('SELECT language FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
-    return translator(row?.language ?? 'en');
+    return translator(row?.language ?? 'ru');
+  }
+
+  async localeFromPool(user: number) {
+    const row = (await this.pool.query('SELECT language FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
+    return translator(row?.language === 'en' ? 'en' : 'ru');
   }
 
   async chooseLanguage(db: PoolClient, user: number) {
-    await this.enqueue(db, this.config.managerId, user, 'Choose your language / Выберите язык',
-      buttons([[['English', 'lang:en'], ['Русский', 'lang:ru']]]));
+    await this.enqueue(db, this.config.managerId, user, 'Выберите язык / Choose your language',
+      buttons([[['Русский', 'lang:ru'], ['English', 'lang:en']]]));
+  }
+
+  async keySettings(db: PoolClient, user: number) {
+    const t = await this.locale(db, user);
+    const connected = await this.credentials?.available(ownerId(user));
+    const stored = await this.credentials?.stored(ownerId(user));
+    await this.enqueue(db, this.config.managerId, user, connected
+      ? t('Your OpenAI key is connected. It is used for all your knowledge bases and bots. You can replace or remove it here.')
+      : t('Connect your OpenAI API key to continue. Open the secure form below; do not send the key in this chat.'), {
+      inline_keyboard: [
+        [{ text: t(connected ? 'Replace OpenAI key' : 'Connect OpenAI key'), web_app: { url: `${this.config.publicUrl}/telegram/openai-key?lang=${(await db.query('SELECT language FROM telegram_sessions WHERE user_id = $1', [user])).rows[0]?.language === 'en' ? 'en' : 'ru'}` } }],
+        ...(stored ? [[{ text: t('Remove OpenAI key'), callback_data: 'remove_key' }]] : []),
+        [{ text: t('Help'), callback_data: 'help:key' }],
+        [{ text: t('Main menu'), callback_data: 'menu' }],
+      ],
+    });
   }
 
   async token(botId: string) {
@@ -83,11 +107,30 @@ export class TelegramService {
     return result.rows[0];
   }
 
+  async welcome(db: PoolClient, user: number) {
+    const t = await this.locale(db, user);
+    await this.enqueue(db, this.config.managerId, user, t(managerIntroduction));
+    return this.menu(db, user);
+  }
+
   async menu(db: PoolClient, user: number) {
     const t = await this.locale(db, user);
     await this.session(db, user, 'menu');
+    if (this.credentials && !(await this.credentials.available(ownerId(user)))) return this.keySettings(db, user);
     await this.enqueue(db, this.config.managerId, user, t('Manage your knowledge bases and Telegram bots.'), buttons([
-      [[t('Create knowledge base'), 'new']], [[t('My knowledge bases'), 'bases:0'], [t('My bots'), 'bots:0']], [[t('Language'), 'language']],
+      [[t('Create knowledge base'), 'new']], [[t('My knowledge bases'), 'bases:0'], [t('My bots'), 'bots:0']], [[t('Language'), 'language'], [t('OpenAI key'), 'openai']], [[t('Help'), 'help:menu']],
+    ]));
+  }
+
+  async help(db: PoolClient, user: number, topic: string = 'menu') {
+    const selected: HelpTopic = Object.hasOwn(managerHelp, topic) ? topic as HelpTopic : 'menu';
+    const t = await this.locale(db, user);
+    await this.enqueue(db, this.config.managerId, user, t(managerHelp[selected]), buttons([
+      [[t('Manager help'), 'help:menu']],
+      [[t('Knowledge base help'), 'help:base']],
+      [[t('Telegram bot help'), 'help:bot']],
+      [[t('OpenAI key help'), 'help:key']],
+      [[t('Main menu'), 'menu']],
     ]));
   }
 
@@ -101,6 +144,7 @@ export class TelegramService {
     const items: [string, string][][] = rows.slice(0, 8).map(row => [[String(row.label).slice(0, 60), `${prefix}:${row.id}`]]);
     if (page > 0) items.push([[t('Previous'), `${kind}:${page - 1}`]]);
     if (rows.length > 8) items.push([[t('Next'), `${kind}:${page + 1}`]]);
+    items.push([[t('Help'), bindBot || kind === 'bots' ? 'help:bot' : 'help:base']]);
     items.push([[t('Main menu'), 'menu']]);
     await this.enqueue(db, this.config.managerId, user, rows.length ? (bindBot ? t('Choose a knowledge base for this bot.') : t('Choose an item.')) : t('No items yet.'), buttons(items));
   }
@@ -114,7 +158,7 @@ export class TelegramService {
       buttons([
         [[t('Refresh status'), `kb:${id}`], [t('Test answers'), `test:${id}`]],
         [[t('Replace content'), `replace:${id}`], [t('Rename'), `rename:${id}`]],
-        [[t('Create Telegram bot'), `create:${id}`]], [[t('Delete knowledge base'), `delete:${id}`]], [[t('Main menu'), 'menu']],
+        [[t('Create Telegram bot'), `create:${id}`]], [[t('Delete knowledge base'), `delete:${id}`]], [[t('Help'), 'help:base']], [[t('Main menu'), 'menu']],
       ]));
   }
 
@@ -123,7 +167,7 @@ export class TelegramService {
     const bot = await this.bot(db, user, id);
     await this.enqueue(db, this.config.managerId, user,
       t('@{username}\nAnswers: {status}\nKnowledge base: {base}\nhttps://t.me/{username}', { username: bot.username, status: t(bot.enabled ? 'enabled' : 'paused'), base: bot.knowledge_base_id ? (await this.base(db, user, bot.knowledge_base_id)).name : t('not selected') }),
-      buttons([[[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Main menu'), 'menu']]]));
+      buttons([[[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Help'), 'help:bot']], [[t('Main menu'), 'menu']]]));
   }
 
   async handle(db: PoolClient, botId: string, update: Update) {
@@ -148,6 +192,9 @@ export class TelegramService {
       }
       return;
     }
+    if (message.key_redacted && message.message_id) {
+      await db.query("INSERT INTO telegram_outbox (bot_id, method, payload) VALUES ($1, 'deleteMessage', $2)", [botId, { chat_id: user.id, message_id: message.message_id }]);
+    }
     const text = message.text;
     const command = text?.split(' ')[0];
     if (callback?.data === 'language' || command === '/language') return this.chooseLanguage(db, user.id);
@@ -165,14 +212,31 @@ export class TelegramService {
           { command: 'help', description: selected('Show available actions') },
           { command: 'cancel', description: selected('Cancel and return to the menu') },
           { command: 'language', description: selected('Change interface language') },
+          { command: 'openai', description: selected('Manage OpenAI key') },
         ],
       }]);
-      return this.menu(db, user.id);
+      return this.welcome(db, user.id);
     }
     const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id = $1', [user.id])).rows[0];
     if (!session?.language) return this.chooseLanguage(db, user.id);
+    if (command === '/help' || callback?.data === 'help' || callback?.data?.startsWith('help:')) {
+      return this.help(db, user.id, callback?.data?.split(':')[1]);
+    }
+    if (command === '/start') return this.welcome(db, user.id);
+    if ((command && ['/menu', '/cancel'].includes(command)) || callback?.data === 'menu') return this.menu(db, user.id);
+    if (this.credentials) {
+      if (command === '/openai' || callback?.data === 'openai') return this.keySettings(db, user.id);
+      if (callback?.data === 'remove_key') {
+        return this.enqueue(db, botId, user.id, t('Remove your OpenAI key? Your bots will stop answering until you connect another key.'),
+          buttons([[[t('Remove key'), 'confirm_remove_key']], [[t('Cancel'), 'openai']]]));
+      }
+      if (callback?.data === 'confirm_remove_key') {
+        await this.credentials.remove(ownerId(user.id));
+        return this.keySettings(db, user.id);
+      }
+      if (!(await this.credentials.available(ownerId(user.id)))) return this.keySettings(db, user.id);
+    }
     if (callback?.data) return this.action(db, user.id, callback.data);
-    if (command && ['/start', '/menu', '/cancel', '/help'].includes(command)) return this.menu(db, user.id);
     if (session.state === 'name' || session.state === 'rename') {
       if (!text?.trim() || text.trim().length > 80 || text.includes('\0')) throw new QueryError(400, 'invalid_name', t('Send a name between 1 and 80 characters.'));
       if (session.state === 'rename') {
@@ -301,12 +365,15 @@ export class TelegramService {
       WHERE telegram_usage.queries < $2 RETURNING queries
     `, [owner, this.config.dailyQueries]);
     if (!quota.rows[0]) throw new QueryError(429, 'daily_limit', t('The daily question limit for this owner has been reached.'));
+    const stopTyping = startTyping(this.api, this.token(botId), chat);
     try {
       const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000));
       await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?'));
     } catch (error) {
       // Keep the quota reservation even when a paid provider request fails.
       await this.enqueue(db, botId, chat, error instanceof QueryError && error.status < 500 ? t(error.message) : t('I could not answer just now. Please try your question again shortly.'));
+    } finally {
+      stopTyping();
     }
   }
 

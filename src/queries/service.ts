@@ -10,6 +10,7 @@ type QueryOptions = {
   pool: Pool;
   embedder: (model: string, dimensions: number) => Embedder;
   answerer: Answerer;
+  providers?: (owner: string, model: string, dimensions: number) => Promise<{ embedder: Embedder; answerer: Answerer }>;
   deadlineMs?: number;
   limits?: QueryLimits;
 };
@@ -59,7 +60,10 @@ export class QuestionAnswering {
       if (version.embedding_dimensions < 1 || version.embedding_dimensions > maxDimensions) {
         throw new QueryError(503, 'embedding_configuration_unavailable', 'The active version uses an unsupported embedding configuration.');
       }
-      const vectors = await call(() => embedder(version.embedding_model, version.embedding_dimensions).embed([question], signal));
+      const providers = this.options.providers
+        ? await call(() => this.options.providers!(ownerId, version.embedding_model, version.embedding_dimensions))
+        : { embedder: embedder(version.embedding_model, version.embedding_dimensions), answerer };
+      const vectors = await call(() => providers.embedder.embed([question], signal));
       validateVectors(vectors, 1, version.embedding_dimensions);
       const matches = await call(() => pool.query<PositionedChunk>(`
         SELECT c.id, c.text, c.position
@@ -78,7 +82,7 @@ export class QuestionAnswering {
       const context = selectContext(matches.rows, neighbors.rows);
       check();
       if (!context.length) return refusal();
-      const generated = await call(() => answerer.answer(question, context, signal));
+      const generated = await call(() => providers.answerer.answer(question, context, signal));
       return this.validateAnswer(generated, context);
     } catch (error) {
       check();

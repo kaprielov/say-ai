@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { config, readAuthConfig, readIngestionConfig, readQueryConfig, readTelegramConfig } from './config.js';
 import { pool } from './db.js';
+import { OwnerOpenAI } from './providers/owner-openai.js';
 import { OpenAIEmbedder } from './ingestion/embeddings.js';
 import { startIngestionWorker } from './ingestion/worker.js';
 import { QuestionAnswering } from './queries/service.js';
@@ -10,15 +11,18 @@ import { startTelegramWorker } from './telegram/worker.js';
 import { OpenAIAnswerer } from './queries/answerer.js';
 
 const queryConfig = readQueryConfig();
-const questions = queryConfig ? new QuestionAnswering({
-  pool,
-  embedder: (model, dimensions) => new OpenAIEmbedder(queryConfig.apiKey, model, dimensions),
-  answerer: new OpenAIAnswerer(queryConfig.apiKey),
-}) : undefined;
 const telegramConfig = readTelegramConfig();
-const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions) : undefined;
-const app = createApp({ pool, ...readAuthConfig(), questions, telegram });
 const ingestion = readIngestionConfig();
+const ownerOpenAI = telegramConfig ? new OwnerOpenAI(pool, telegramConfig.encryptionKey, queryConfig?.apiKey,
+  ingestion?.model, ingestion?.dimensions) : undefined;
+const questions = queryConfig || ownerOpenAI ? new QuestionAnswering({
+  pool,
+  embedder: (model, dimensions) => new OpenAIEmbedder(queryConfig?.apiKey ?? '', model, dimensions),
+  answerer: new OpenAIAnswerer(queryConfig?.apiKey ?? ''),
+  providers: ownerOpenAI ? (owner, model, dimensions) => ownerOpenAI.providers(owner, model, dimensions) : undefined,
+}) : undefined;
+const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions, ownerOpenAI) : undefined;
+const app = createApp({ pool, ...readAuthConfig(), questions, telegram });
 let worker: Awaited<ReturnType<typeof startIngestionWorker>> | undefined;
 let telegramWorker: Awaited<ReturnType<typeof startTelegramWorker>> | undefined;
 let server: ReturnType<typeof app.listen> | undefined;
@@ -39,10 +43,10 @@ async function shutdown(failed = false) {
 
 if (ingestion) {
   try {
-    worker = await startIngestionWorker(pool, new OpenAIEmbedder(ingestion.apiKey, ingestion.model, ingestion.dimensions), () => {
+    worker = await startIngestionWorker(pool, new OpenAIEmbedder(ingestion.apiKey ?? '', ingestion.model, ingestion.dimensions), () => {
       console.error('Ingestion worker stopped unexpectedly. Restart the application to recover unfinished work.');
       void shutdown(true);
-    });
+    }, ownerOpenAI ? owner => ownerOpenAI.ingestionEmbedder(owner, ingestion.model, ingestion.dimensions) : undefined);
   } catch {
     console.error('Unable to start ingestion worker. Check database availability and ensure only one application instance is running.');
     await pool.end();

@@ -9,6 +9,7 @@ export class IngestionProcessor {
     private readonly client: PoolClient,
     private readonly embedder: Embedder,
     private readonly retryDelaysMs: readonly [number, number] = [10_000, 60_000],
+    private readonly ownerEmbedder?: (owner: string) => Promise<Embedder>,
   ) {}
 
   private async transaction<T>(work: () => Promise<T>): Promise<T> {
@@ -91,13 +92,20 @@ export class IngestionProcessor {
     if (!task) return false;
     const attemptSignal = AbortSignal.any([signal, AbortSignal.timeout(10 * 60_000)]);
     try {
+      const owner = this.ownerEmbedder ? (await this.client.query<{ owner_id: string }>(
+        'SELECT owner_id FROM knowledge_bases WHERE id = $1', [task.knowledge_base_id],
+      )).rows[0]!.owner_id : undefined;
+      const embedder = owner ? await this.ownerEmbedder!(owner) : this.embedder;
+      if (embedder.model !== this.embedder.model || embedder.dimensions !== this.embedder.dimensions) {
+        throw new IngestionError('embedding_configuration_mismatch', 'Owner embedding configuration does not match the content version.', false);
+      }
       const chunks = chunkText(task.source_text);
       if (chunks.length === 0) throw new IngestionError('empty_content', 'Source contains no usable content.', false);
       for (let offset = 0; offset < chunks.length; offset += 16) {
         attemptSignal.throwIfAborted();
         const batch = chunks.slice(offset, offset + 16);
-        const vectors = await this.embedder.embed(batch.map(chunk => chunk.text), attemptSignal);
-        validateVectors(vectors, batch.length, this.embedder.dimensions);
+        const vectors = await embedder.embed(batch.map(chunk => chunk.text), attemptSignal);
+        validateVectors(vectors, batch.length, embedder.dimensions);
         attemptSignal.throwIfAborted();
         await this.transaction(async () => {
           for (let index = 0; index < batch.length; index++) {

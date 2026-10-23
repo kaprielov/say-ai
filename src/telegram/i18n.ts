@@ -1,11 +1,39 @@
+import { managerIntroduction, managerHelp, russianManagerIntroduction, russianManagerHelp } from './guide.js';
+
 export type Language = 'en' | 'ru';
 
-// Russian UI copy is explicitly requested for the manager; code and documentation remain English.
+// Keep manager copy available in every supported interface language.
 const russian: Record<string, string> = {
+  [managerIntroduction]: russianManagerIntroduction,
+  ...Object.fromEntries(Object.entries(managerHelp).map(([topic, source]) => [source, russianManagerHelp[topic as keyof typeof managerHelp]])),
+  'Help': 'Справка',
+  'Manager help': 'Справка по менеджеру',
+  'Knowledge base help': 'Справка по базе знаний',
+  'Telegram bot help': 'Справка по Telegram-боту',
+  'OpenAI key help': 'Справка по ключу OpenAI',
   'Manage your knowledge bases and Telegram bots.': 'Управляйте базами знаний и Telegram-ботами.',
   'Create knowledge base': 'Создать базу знаний',
   'My knowledge bases': 'Мои базы знаний',
   'My bots': 'Мои боты',
+  'OpenAI key': 'Ключ OpenAI',
+  'Manage OpenAI key': 'Управление ключом OpenAI',
+  'Your OpenAI key is connected. It is used for all your knowledge bases and bots. You can replace or remove it here.': 'Ключ OpenAI подключён и используется для всех ваших баз знаний и ботов. Здесь его можно заменить или удалить.',
+  'Connect your OpenAI API key to continue. Open the secure form below; do not send the key in this chat.': 'Для продолжения подключите свой API-ключ OpenAI через форму ниже. Не отправляйте ключ сообщением в этот чат.',
+  'Connect OpenAI key': 'Подключить ключ OpenAI',
+  'Replace OpenAI key': 'Заменить ключ OpenAI',
+  'Remove OpenAI key': 'Удалить ключ OpenAI',
+  'Remove key': 'Удалить ключ',
+  'Remove your OpenAI key? Your bots will stop answering until you connect another key.': 'Удалить ключ OpenAI? Боты перестанут отвечать, пока вы не подключите новый ключ.',
+  'Enter a valid OpenAI API key.': 'Введите действительный API-ключ OpenAI.',
+  'OpenAI rejected this key. Check it and try again.': 'OpenAI отклонил ключ. Проверьте его и попробуйте снова.',
+  'This key needs access to embeddings and the answering model.': 'Ключу нужен доступ к embeddings и модели ответов.',
+  'OpenAI reports a quota or rate limit. Check API billing and try again later.': 'OpenAI сообщил о лимите запросов или средств. Проверьте API-биллинг и повторите попытку позже.',
+  'OpenAI could not be reached. Try again shortly.': 'Не удалось связаться с OpenAI. Попробуйте чуть позже.',
+  'OpenAI could not validate this key. Try again shortly.': 'Не удалось проверить ключ через OpenAI. Попробуйте чуть позже.',
+  'Open this form from the manager again.': 'Откройте форму заново из менеджера.',
+  'Too many key checks. Try again in one minute.': 'Слишком много проверок ключа. Повторите через минуту.',
+  'OpenAI key saved. You can now create knowledge bases and bots.': 'Ключ OpenAI сохранён. Теперь можно создавать базы знаний и ботов.',
+  'Connect your OpenAI API key in the manager to continue.': 'Для продолжения подключите ключ OpenAI в менеджере.',
   'Language': 'Язык',
   'Language saved.': 'Язык сохранён.',
   'Open the main menu': 'Открыть главное меню',

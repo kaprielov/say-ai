@@ -128,6 +128,7 @@ export async function startTelegramWorker(service: TelegramService, onFailure: (
       { command: 'start', description: 'Open the main menu' }, { command: 'help', description: 'Show available actions' },
       { command: 'cancel', description: 'Cancel and return to the menu' },
       { command: 'language', description: 'Change interface language' },
+      { command: 'openai', description: 'Manage OpenAI key' },
     ] });
   } catch (error) {
     db.removeListener('error', onError);

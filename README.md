@@ -1,6 +1,6 @@
 # Say AI
 
-RAG API in development, using Node.js, TypeScript, Express, and PostgreSQL with pgvector.
+RAG API and Telegram bot manager in development, using Node.js, TypeScript, Express, and PostgreSQL with pgvector.
 
 ## Local setup
 
@@ -46,6 +46,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run test:documents` | Test document extraction capacity, cancellation, and cleanup without database or provider calls. |
 | `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
 | `npm run test:queries` | Test question answering, ownership, retrieval, grounding contracts, concurrency, deadlines, and cancellation in a temporary database. No paid provider calls by default. |
+| `npm run test:owner-keys` | Verify encrypted owner credentials, Mini App authentication, onboarding, validation, and provider routing with controlled transports. |
 | `npm run test:telegram` | Verify Telegram ownership, bot lifecycle, durable processing, quotas, and topic redirections with controlled transports. |
 | `npm run test:dev-public` | Verify tunnel startup, public URL injection, and child-process cleanup without real public access. |
 | `npm run test:replacement` | Test content replacement through the API, concurrent submissions, version switching, failure recovery, and old-version availability. Uses a temporary database and controlled providers. |
@@ -213,7 +214,7 @@ This smoke test exercises a supported answer, a missing-information redirection,
 
 ## Background ingestion
 
-Set `OPENAI_API_KEY` in `.env` or the shell to enable the worker, then start the application with `npm run dev` or `npm start`. This is the provider credential; it is separate from `DEVELOPER_API_KEY`, which authenticates callers of this API. Leave `OPENAI_API_KEY` empty to run the API without ingestion. `INGESTION_ENABLED=false` explicitly pauses the worker; `INGESTION_ENABLED=true` requires a provider key.
+For developer-owned HTTP bases, set `OPENAI_API_KEY` in `.env` or the shell to enable the worker, then start the application with `npm run dev` or `npm start`. This is the provider credential; it is separate from `DEVELOPER_API_KEY`, which authenticates callers of this API. Without Telegram configured, leaving `OPENAI_API_KEY` empty runs the API without ingestion. With Telegram configured, the worker starts by default and resolves each Telegram owner's saved key; no shared OpenAI key is required. The developer HTTP owner still needs the server key. `INGESTION_ENABLED=false` explicitly pauses the worker; `INGESTION_ENABLED=true` requires either a server key or configured Telegram owner-key support.
 
 The worker polls once per second while idle and processes one task at a time inside the application. An exclusive PostgreSQL advisory lock prevents two application instances from running ingestion and startup recovery against the same database. A worker database failure shuts down the application with a nonzero exit code; restart it to recover durable work.
 
@@ -255,7 +256,7 @@ The current application provides the health endpoint, database foundation, singl
 
 ## Telegram interface
 
-The optional Telegram integration provides the user interface through a manager bot and native Telegram buttons; no frontend or Mini App is required. Each private-chat user owns knowledge bases under the stable `telegram:<numeric-user-id>` owner ID. The developer HTTP key retains its configured owner and does not grant Telegram users HTTP access.
+The optional Telegram integration provides management through a manager bot and native Telegram buttons. A small server-rendered Mini App form handles OpenAI keys, without a separate frontend project. Each private-chat user owns knowledge bases under the stable `telegram:<numeric-user-id>` owner ID. The developer HTTP key retains its configured owner and does not grant Telegram users HTTP access.
 
 ### Setup
 
@@ -269,10 +270,22 @@ The optional Telegram integration provides the user interface through a manager 
    node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
    ```
 
-5. Configure `OPENAI_API_KEY` for ingestion and answering, run `npm run db:migrate`, then start the application. Startup verifies the manager token and registers its commands and the webhooks of the manager and all stored child bots. Leaving the manager token empty disables Telegram integration.
-6. Open the manager bot in a current Telegram client, send `/start`, and choose **English** or **Русский**. The preference is stored per Telegram user. Existing users without a preference are also prompted on their next interaction.
+5. Optionally configure `OPENAI_API_KEY` for developer-owned HTTP bases. Telegram owners supply their own keys during onboarding. Run `npm run db:migrate`, then start the application. Startup verifies the manager token and registers its commands and the webhooks of the manager and all stored child bots. Leaving the manager token empty disables Telegram integration.
+6. Open the manager bot in a current Telegram client, send `/start`, and choose **English** or **Русский**. The preference is stored per Telegram user. Existing users without a preference are also prompted on their next interaction. Then choose **Connect OpenAI key** and complete the form before accessing the main menu.
 
 Preserve the encryption key across restarts and deployments. Existing managed bot tokens cannot be decrypted with another key. Webhook secrets and encrypted bot credentials are server-side only. A change to the manager webhook secret is applied on startup; existing child bots keep their own stored secrets. When the public URL changes, restarting the backend updates every stored bot webhook, including paused bots. Invalid child credentials pause that bot without blocking the others; other registration failures stop startup so it can be retried. The public development command stops both processes with Ctrl+C or when either process exits. Its temporary URL changes on each launch; a named Cloudflare Tunnel with a domain is an option for a stable hostname. Quick Tunnels are intended for development.
+
+### Owner OpenAI keys
+
+Onboarding is **language → OpenAI key → main menu**. The manager requires a saved, valid owner key before accepting knowledge-base or bot management actions. Existing users must also connect a key. **OpenAI key** in the menu or `/openai` opens settings for replacement or removal. Removal requires confirmation and blocks future provider calls until another key is connected; requests already in flight can finish with their captured key.
+
+The button opens `/telegram/openai-key` as a Telegram Mini App. The password field posts the key directly to the backend, never through `Telegram.WebApp.sendData` or the bot chat. The form does not persist it in browser storage or a URL. The server validates Telegram's signed `initData`, rejects duplicate fields, and accepts sessions up to ten minutes old with a 30-second future-clock allowance. The signed user determines ownership; client-supplied owner IDs are ignored. Same-origin checks, CSP, bounded JSON, and `no-store` responses protect the credential endpoint. Open the form again if its session expires. Temporary tunnel URLs in old messages expire; request a fresh settings message after a tunnel restart.
+
+Validation performs one short embeddings request with the configured ingestion model and one minimal GPT-6 Luna Responses request. These two calls are billable against the submitted key. The form explains this before submission. A key needs API billing and access to both endpoints/models. Checks are limited to three attempts per owner per minute. Invalid, restricted, quota-limited, and temporarily unavailable checks receive distinct messages; a failed replacement leaves the old key intact.
+
+`owner_openai_keys` stores only AES-256-GCM ciphertext, a revision, validity, and update time. Its encryption key is derived from `TELEGRAM_TOKEN_ENCRYPTION_KEY` with a separate domain from Telegram bot credentials. Preserve that master key. Plaintext keys are not returned, logged, or placed in the Telegram queue. Key-like strings accidentally sent in Telegram updates are redacted before persistence, and a pasted manager message is scheduled for deletion where possible; this cannot undo its initial transmission through Telegram.
+
+Every Telegram query resolves credentials from the registered base owner and captures one key for both question embeddings and generation. Ingestion resolves the owner key once per attempt for all embedding batches. The server's `OPENAI_API_KEY` is never a fallback for a Telegram owner. A `401` or `403` provider response invalidates the captured revision; an older in-flight request cannot invalidate a newer replacement. Missing credentials fail ingestion without a provider request. After reconnecting a key, resubmit failed content from **Replace content**. Changing only the key does not require re-embedding ready content when the embedding configuration remains compatible.
 
 ### User flow
 

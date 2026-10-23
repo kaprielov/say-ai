@@ -24,13 +24,14 @@ export function readAuthConfig() {
 
 export function readIngestionConfig() {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
+  const telegramEnabled = Boolean(process.env.TELEGRAM_MANAGER_TOKEN?.trim());
   const setting = process.env.INGESTION_ENABLED;
   if (setting !== undefined && setting !== 'true' && setting !== 'false') {
     throw new Error('INGESTION_ENABLED must be true or false.');
   }
-  const enabled = setting === undefined ? Boolean(apiKey) : setting === 'true';
+  const enabled = setting === undefined ? Boolean(apiKey || telegramEnabled) : setting === 'true';
   if (!enabled) return undefined;
-  if (!apiKey) throw new Error('OPENAI_API_KEY is required when ingestion is enabled.');
+  if (!apiKey && !telegramEnabled) throw new Error('OPENAI_API_KEY or Telegram owner keys are required when ingestion is enabled.');
   const model = process.env.EMBEDDING_MODEL ?? 'text-embedding-3-small';
   if (model !== 'text-embedding-3-small' && model !== 'text-embedding-3-large') {
     throw new Error('EMBEDDING_MODEL must be text-embedding-3-small or text-embedding-3-large.');
