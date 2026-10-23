@@ -12,6 +12,7 @@ import { OpenAIEmbedder } from '../src/ingestion/embeddings.ts';
 import { OpenAIAnswerer } from '../src/queries/answerer.ts';
 import { QuestionAnswering } from '../src/queries/service.ts';
 import { QueryLimits } from '../src/queries/limits.ts';
+import { selectContext } from '../src/queries/context.ts';
 
 const databaseName = `say_ai_queries_test_${randomBytes(8).toString('hex')}`;
 const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -218,6 +219,47 @@ test('context selection fits a token budget and invalid model citations are reje
   const response = await query(url, kb.kbId);
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error.code, 'invalid_answer_response');
+});
+
+test('a weakly ranked continuation is retrieved as a neighbor from the captured version only', async () => {
+  const old = await readyKnowledgeBase({ text: 'Outdated ordering policy.' });
+  const current = await readyKnowledgeBase({ kbId: old.kbId, text: 'Mixed orders wait for all items. To receive available items earlier,' });
+  const foreign = await readyKnowledgeBase({ owner: 'another-owner', text: 'Private ordering policy.' });
+  const insert = async (versionId, position, text, vector) => (await pool.query(`
+    INSERT INTO chunks (version_id, position, text, token_count, embedding_dimensions, embedding)
+    VALUES ($1, $2, $3, $4, 3, $5::vector) RETURNING id
+  `, [versionId, position, text, countTokens(text), JSON.stringify(vector)])).rows[0].id;
+  const continuation = 'place two separate orders. Delivery fees are calculated independently for each order.';
+  const continuationId = await insert(current.versionId, 1, continuation, [-1, 0, 0]);
+  await insert(old.versionId, 1, 'Old neighbor must not leak.', [1, 0, 0]);
+  await insert(foreign.versionId, 1, 'Foreign neighbor must not leak.', [1, 0, 0]);
+  for (let position = 2; position < 10; position++) {
+    await insert(current.versionId, position, `Other policy ${position}.`, [0.5, 0.5, 0]);
+  }
+  const url = await startApp(service({ answerer: { answer: async (_question, context) => {
+    assert.ok(context.some(chunk => chunk.id === current.chunkId));
+    assert.ok(context.some(chunk => chunk.id === continuationId));
+    assert.ok(context.every(chunk => !/must not leak/.test(chunk.text)));
+    assert.equal(new Set(context.map(chunk => chunk.id)).size, context.length);
+    return { outcome: 'answered', answer: 'Place two separate orders; delivery is calculated independently.', chunk_ids: [current.chunkId, continuationId] };
+  } } }));
+  const response = await query(url, current.kbId, { question: 'How can I receive available items earlier, and how are delivery fees calculated?' });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.sources.find(source => source.chunk_id === continuationId).text, continuation);
+});
+
+test('neighbor expansion preserves three strong topics, deduplicates windows, and respects the budget', () => {
+  const chunk = (position, text = 'Evidence '.repeat(450)) => ({ id: `chunk-${position}`, position, text });
+  const matches = [chunk(5), chunk(20), chunk(40), chunk(6), chunk(60), chunk(80)];
+  const neighbors = [chunk(4), chunk(6), chunk(19), chunk(21), chunk(39), chunk(41)];
+  const context = selectContext(matches, neighbors);
+  for (const position of [5, 20, 40, 6, 60]) assert.ok(context.some(item => item.id === `chunk-${position}`));
+  assert.equal(new Set(context.map(item => item.id)).size, context.length);
+  assert.ok(countTokens(JSON.stringify(context)) <= 3000);
+  assert.ok(context.length < new Set([...matches, ...neighbors].map(item => item.id)).size);
+  assert.ok(context.every(item => [...matches, ...neighbors].some(original => original.id === item.id && original.text === item.text)));
+  assert.deepEqual(selectContext([chunk(0, 'word '.repeat(4000))], []), []);
 });
 
 test('one admission limit covers three active questions across different knowledge bases; the fourth is rejected', async () => {

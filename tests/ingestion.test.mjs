@@ -89,6 +89,51 @@ test('chunking preserves Unicode source substrings, bounds tokens, and treats sp
   assert.equal(chunkText(short)[0].text, short);
 });
 
+test('chunking keeps complete paragraphs together when they fit individually', () => {
+  const paragraphs = Array.from({ length: 12 }, (_, index) =>
+    `Policy ${index}: Available items wait for the last item in the order. Separate orders have independent delivery fees.\n\n`);
+  const source = paragraphs.join('');
+  const chunks = chunkText(source, 64, 0);
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks.map(chunk => chunk.text).join(''), source);
+  for (const paragraph of paragraphs) assert.ok(chunks.some(chunk => chunk.text.includes(paragraph)));
+  assert.equal(chunks.length, paragraphs.length, 'Short policies must not share an embedding');
+  for (const chunk of chunks) assert.ok(chunk.tokenCount <= 64);
+});
+
+test('long paragraphs split at sentence boundaries and overlap uses whole sentences', () => {
+  const sentences = Array.from({ length: 25 }, (_, index) => `Rule ${index} applies to every order. `);
+  const source = sentences.join('');
+  const chunks = chunkText(source, 36, 10);
+  let covered = 0;
+  for (const chunk of chunks) {
+    const start = source.indexOf(chunk.text);
+    assert.ok(start >= 0 && start <= covered, 'No source text may be skipped');
+    assert.match(chunk.text, /^Rule \d+ applies/);
+    assert.match(chunk.text, /every order\. $/);
+    assert.ok(chunk.tokenCount <= 36);
+    covered = start + chunk.text.length;
+  }
+  assert.equal(covered, source.length);
+  assert.ok(chunks[0].text.endsWith(sentences[3]));
+  assert.ok(chunks[1].text.startsWith(sentences[3]), 'The last complete sentence is reused');
+});
+
+test('oversized sentences fall back to bounded Unicode slices without losing source text', () => {
+  const source = 'Short introduction.\n\n' + 'uninterrupted👩🏽‍💻'.repeat(100) + '\n\nFinal paragraph.';
+  const chunks = chunkText(source, 32, 4);
+  let covered = 0;
+  for (const chunk of chunks) {
+    const start = source.lastIndexOf(chunk.text, covered);
+    assert.ok(start >= 0 && start <= covered);
+    assert.ok(start + chunk.text.length > covered, 'Every chunk contributes new text');
+    assert.ok(chunk.tokenCount <= 32);
+    assert.ok(!chunk.text.includes('\ufffd'));
+    covered = start + chunk.text.length;
+  }
+  assert.equal(covered, source.length);
+});
+
 test('OpenAI adapter uses the documented request and maps vectors by response index', async () => {
   const adapter = new OpenAIEmbedder('test-secret', 'text-embedding-3-small', 3, async (url, options) => {
     assert.equal(url, 'https://api.openai.com/v1/embeddings');

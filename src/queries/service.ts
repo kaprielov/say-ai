@@ -4,6 +4,7 @@ import { validateVectors, type Embedder } from '../ingestion/embeddings.js';
 import type { Answerer, ContextChunk, GeneratedAnswer } from './answerer.js';
 import { QueryError } from './errors.js';
 import { QUERY_DEADLINE_MS, queryLimits, type QueryLimits } from './limits.js';
+import { contextConfig, selectContext, type PositionedChunk } from './context.js';
 
 type QueryOptions = {
   pool: Pool;
@@ -60,17 +61,21 @@ export class QuestionAnswering {
       }
       const vectors = await call(() => embedder(version.embedding_model, version.embedding_dimensions).embed([question], signal));
       validateVectors(vectors, 1, version.embedding_dimensions);
-      const matches = await call(() => pool.query<ContextChunk>(`
-        SELECT c.id, c.text
+      const matches = await call(() => pool.query<PositionedChunk>(`
+        SELECT c.id, c.text, c.position
         FROM chunks c JOIN content_versions v ON v.id = c.version_id
         WHERE c.version_id = $2 AND v.knowledge_base_id = $3
-        ORDER BY c.embedding <=> $1::vector, c.position LIMIT 8
-      `, [JSON.stringify(vectors[0]), version.version_id, id]));
-      const context: ContextChunk[] = [];
-      for (const match of matches.rows) {
-        const candidate = { id: match.id, text: match.text };
-        if (countTokens(JSON.stringify([...context, candidate])) <= 3000) context.push(candidate);
-      }
+        ORDER BY c.embedding <=> $1::vector, c.position LIMIT $4
+      `, [JSON.stringify(vectors[0]), version.version_id, id, contextConfig.candidates]));
+      const positions = [...new Set(matches.rows.slice(0, contextConfig.seeds)
+        .flatMap(match => [match.position + 1, match.position - 1]).filter(position => position >= 0))];
+      const neighbors = positions.length ? await call(() => pool.query<PositionedChunk>(`
+        SELECT c.id, c.text, c.position
+        FROM chunks c JOIN content_versions v ON v.id = c.version_id
+        WHERE c.version_id = $1 AND v.knowledge_base_id = $2 AND c.position = ANY($3::int[])
+        ORDER BY c.position
+      `, [version.version_id, id, positions])) : { rows: [] };
+      const context = selectContext(matches.rows, neighbors.rows);
       check();
       if (!context.length) return refusal();
       const generated = await call(() => answerer.answer(question, context, signal));
