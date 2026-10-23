@@ -14,7 +14,7 @@ Transient ingestion failures allow three persisted attempts total, separated by 
 
 Question answering is implemented at `POST /knowledge-bases/{id}/queries`, using the captured ready version's embedding configuration and exact cosine retrieval. It ranks eight chunks without a similarity cutoff and budgets serialized context to 3000 `cl100k_base` tokens. The initial `0.6` filter was removed after it rejected useful opening-hours evidence scoring about `0.37`; the model now assesses answerability from the retrieved context. The selected answering model is GPT-6 Luna through the Responses API, with reasoning disabled, structured answers/refusals, source chunk IDs, response storage disabled, and an output cap of 768 tokens. Unsupported questions return an explicit insufficient-context outcome; model citations are checked against supplied chunks.
 
-An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A ten-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. One synthetic live answer/refusal smoke test has passed; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated.
+An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A 30-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. One synthetic live answer/refusal smoke test has passed; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated.
 
 Content replacement is implemented at `PUT /knowledge-bases/{id}/content`. It checks ownership, locks the knowledge-base row, and durably saves the complete replacement text and a pending task before returning `202`. The existing partial unique index prevents overlapping pending/processing submissions, which return `409` with `ingestion_in_progress`. Submission timestamps are recorded after acquiring the row lock. Replacement leaves the active version unchanged until the ingestion activation transaction succeeds; existing queries keep their captured version, and terminal failure preserves the previous ready version. A new submission is allowed after terminal failure. Validation, concurrent acceptance, recovery, rollback, and version availability are covered by API/database tests.
 
@@ -54,12 +54,12 @@ Developers operate their own bots and call this API. Telegram is the initial int
 | Knowledge bases | 20 |
 | Content volume | 100 pages per knowledge base |
 | Query concurrency | Up to 3 questions being processed at once globally, across all knowledge bases; reject additional requests immediately with `429 Too Many Requests` |
-| Answer latency | Maximum 10 seconds; no streaming |
+| Answer latency | Maximum 30 seconds; no streaming |
 | Ingestion freshness | Submitted text becomes available for questions within a maximum of 1 hour |
 
 Plain text has no fixed page size. The page estimate must be translated into bytes or tokens if a later capacity decision requires it.
 
-The agreed 10-second deadline covers the full query, including embedding, retrieval, and generation. On timeout, return an explicit error, attempt to cancel the model call, and do not automatically retry within that request. The exact timeout HTTP code and response body remain open. Cancellation may not stop provider-side execution or charges.
+The agreed 30-second deadline covers the full query, including embedding, retrieval, and generation. On timeout, return an explicit error, attempt to cancel the model call, and do not automatically retry within that request. The exact timeout HTTP code and response body remain open. Cancellation may not stop provider-side execution or charges.
 
 Declining unsupported questions is required behavior. Start with manual answer-quality evaluation using a repeatable question set (section 12). Numerical quality and latency success-rate targets remain open.
 
@@ -173,7 +173,7 @@ The check and creation of the new task must prevent two simultaneous requests fr
 
 - Enforce a global limit of three concurrent questions across all knowledge bases, not three per knowledge base.
 - Reject an additional question immediately with `429 Too Many Requests`; do not place it in a waiting queue. The developer's bot handles rejection and may retry later.
-- Enforce a 10-second deadline over the query work, including embedding, retrieval, and generation.
+- Enforce a 30-second deadline over the query work, including embedding, retrieval, and generation.
 - On timeout, return an explicit timeout error and attempt cancellation. Do not automatically retry within the request.
 - Release the request's concurrency slot on completion, failure, or timeout. Track any provider calls still running after cancellation separately so abandoned work does not silently accumulate.
 - For one application instance, a shared in-memory counter was proposed. Multiple instances would need coordinated enforcement; the mechanism is not yet selected.
@@ -248,7 +248,7 @@ These apply existing requirements to the draft; the concrete mechanisms remain t
 - Select context within a token budget rather than blindly including every retrieved chunk. Retrieval count, selection strategy, and budget are not yet specified.
 - Similarity search returns the nearest available matches even when they cannot answer the question. The system must still support declining for insufficient evidence. The evidence assessment and refusal mechanism are open design decisions.
 - The developer proposed cosine similarity with a refusal threshold of `0.6`. A working interpretation is to filter retrieved chunks below the threshold and decline if none remain. This aggregation rule is a review suggestion; the numerical threshold is provisional and must be evaluated with the selected embedding model and representative questions. A high similarity score alone does not establish that a chunk contains the answer.
-- Bound the full request, including embedding, retrieval, and generation, by the agreed 10-second deadline. Apply the global concurrency limit and timeout behavior in section 8; exact timeout error details remain open.
+- Bound the full request, including embedding, retrieval, and generation, by the agreed 30-second deadline. Apply the global concurrency limit and timeout behavior in section 8; exact timeout error details remain open.
 
 ## 11. Proposed architecture and technology options
 
@@ -281,7 +281,7 @@ flowchart LR
 | Backend | Express with TypeScript is sufficient for the MVP; NestJS offers established application conventions. FastAPI with Python was also compared. | Express requires choosing application structure; NestJS introduces additional framework concepts. Python may fit preferred RAG libraries, while TypeScript may fit developer familiarity. |
 | Storage | PostgreSQL with pgvector is the proposed starting point. | One database simplifies operation and version switching, but ingestion, vector search, and metadata operations share resources. |
 | Embeddings | `text-embedding-3-small` was recommended as an initial baseline. `text-embedding-3-large` and Voyage `voyage-4` were alternatives to evaluate. | Retrieval quality must be measured on representative content; changing to an incompatible embedding model requires re-embedding stored content. |
-| Answering | `gpt-6-luna` was recommended as a hosted baseline, initially with reasoning disabled. `gpt-4.1-mini` and `gemini-3.5-flash-lite` were comparison candidates. | Provider documentation does not prove grounded-answer quality or compliance with this system's 10-second deadline. |
+| Answering | `gpt-6-luna` was recommended as a hosted baseline, initially with reasoning disabled. `gpt-4.1-mini` and `gemini-3.5-flash-lite` were comparison candidates. | Provider documentation does not prove grounded-answer quality or compliance with this system's 30-second deadline. |
 
 Model research was performed on 21 October 2026. Availability and pricing should be checked when implementing. No model calls or workload benchmarks were performed during that research. Store embedding model and dimensions with a knowledge-base version; keep answering-model selection independent of embedding selection.
 

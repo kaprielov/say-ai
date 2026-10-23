@@ -3,7 +3,7 @@ import { countTokens } from '../ingestion/chunking.js';
 import { validateVectors, type Embedder } from '../ingestion/embeddings.js';
 import type { Answerer, ContextChunk, GeneratedAnswer } from './answerer.js';
 import { QueryError } from './errors.js';
-import { queryLimits, type QueryLimits } from './limits.js';
+import { QUERY_DEADLINE_MS, queryLimits, type QueryLimits } from './limits.js';
 
 type QueryOptions = {
   pool: Pool;
@@ -19,7 +19,7 @@ export class QuestionAnswering {
   constructor(private readonly options: QueryOptions) {}
 
   async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal) {
-    const { pool, embedder, answerer, deadlineMs = 10_000, limits = queryLimits } = this.options;
+    const { pool, embedder, answerer, deadlineMs = QUERY_DEADLINE_MS, limits = queryLimits } = this.options;
     const release = limits.enter();
     const controller = new AbortController();
     const timeoutError = () => new QueryError(504, 'query_timeout', 'The query exceeded its deadline.');

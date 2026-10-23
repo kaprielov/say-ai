@@ -103,7 +103,7 @@ This is the first usable development slice. It is not yet the complete MVP.
 ### Work
 
 - Add one application-wide admission gate for three concurrent queries. Acquire a slot without waiting; return `429` with `query_concurrency_exceeded` when full.
-- Apply one 10-second deadline from query admission through embedding, retrieval, and generation. Pass remaining time and cancellation signals to downstream operations.
+- Apply one 30-second deadline from query admission through embedding, retrieval, and generation. Pass remaining time and cancellation signals to downstream operations.
 - Use `504` with `query_timeout` as the proposed timeout contract. Disable automatic query retries in provider clients.
 - Release the admission slot on success, refusal, error, timeout, or client disconnect.
 - Track provider calls that remain unresolved after cancellation separately. Bound provider transport timeouts and add a protective limit so repeated timeouts cannot accumulate unlimited abandoned work.
@@ -123,7 +123,7 @@ This is the first usable development slice. It is not yet the complete MVP.
 - Create a representative plain-text fixture and a repeatable 20-question evaluation set: eight directly answerable, six paraphrased, and six unsupported questions.
 - Record expected answers or refusals and supporting passages before tuning retrieval or prompts.
 - Add an evaluation script that records retrieved evidence, outcomes, model configuration, and full response latency for manual review.
-- Run it with one and three concurrent queries, including a run during ingestion. Report observed behavior against the 10-second query and one-hour ingestion requirements.
+- Run it with one and three concurrent queries, including a run during ingestion. Report observed behavior against the 30-second query and one-hour ingestion requirements.
 - Review retrieval and answer quality separately. Agree on numerical quality and reliability targets after the baseline; do not claim these from a single successful run.
 - Add request IDs and timings for embedding, retrieval, generation, and ingestion attempts. Record token usage where supplied, retries, refusals, timeouts, and rejected queries.
 - Default logs to metadata without raw source text, questions, answers, or credentials. Decide explicitly whether content traces and an external tool such as Langfuse are needed.

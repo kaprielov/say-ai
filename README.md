@@ -143,7 +143,7 @@ Retrieval ranks the closest eight chunks by cosine similarity without a similari
 
 Prompts instruct the model to use only supplied evidence and treat questions and source text as untrusted data. Answered responses must cite supplied chunk IDs; missing or invented citations are rejected. Semantic grounding still requires manual quality evaluation; structured output and valid citations alone do not prove every claim is supported.
 
-At most three queries run concurrently across all knowledge bases in one application process. Additional queries receive `429` immediately, without waiting. A single ten-second deadline covers admitted query processing, including token validation, ownership lookup, embedding, retrieval, and generation. Timeout returns `504`, attempts cancellation, and releases the query slot. Client disconnection also attempts cancellation. No provider requests are automatically retried.
+At most three queries run concurrently across all knowledge bases in one application process. Additional queries receive `429` immediately, without waiting. A single 30-second deadline covers admitted query processing, including token validation, ownership lookup, embedding, retrieval, and generation. Timeout returns `504`, attempts cancellation, and releases the query slot. Client disconnection also attempts cancellation. No provider requests are automatically retried.
 
 Operations still running after cancellation remain counted until they settle. A separate cap of six outstanding downstream operations prevents repeated timed-out requests from accumulating unlimited work; it can also cause `429` while fewer than three queries are active. Native provider transports have finite timeouts, and the configured production database pool bounds connection waits and SQL execution. Cancellation cannot guarantee that provider-side execution or charges stop.
 
@@ -157,7 +157,7 @@ Operations still running after cancellation remain counted until they settle. A 
 | `429` | Query capacity is full. |
 | `502` | Downstream processing failed or the answering model returned an incomplete, refused, or invalid response. Provider details are not exposed. |
 | `503` | OpenAI credentials are absent or the stored embedding configuration is unsupported. Ingestion can be paused independently of querying. |
-| `504` | The query exceeded its ten-second deadline. |
+| `504` | The query exceeded its 30-second deadline. |
 
 An insufficient-evidence outcome is a successful `200` refusal, separate from a provider-level safety refusal or processing failure. The application does not persist questions or answers. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
 

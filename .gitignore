@@ -1,7 +1,25 @@
 node_modules/
 dist/
+coverage/
+*.tsbuildinfo
+
+# Local credentials
 .env
 .env.*
 !.env.example
+/AGENTS.md
+
+# Runtime logs and evaluation results
+/logs/
 *.log
+
+# Local Russian-language evaluation artifacts; exclude until translated
+/fixtures/internet-store-knowledge-base.md
+/scripts/evaluate-store.mjs
+
+# Temporary files and OS metadata
+/tmp/
+/temp/
+*.swp
+*.swo
 .DS_Store

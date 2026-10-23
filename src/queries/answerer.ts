@@ -1,4 +1,5 @@
 import { QueryError } from './errors.js';
+import { QUERY_DEADLINE_MS } from './limits.js';
 
 export type ContextChunk = { id: string; text: string };
 export type GeneratedAnswer = { outcome: 'answered' | 'insufficient_context'; answer: string | null; chunk_ids: string[] };
@@ -22,7 +23,7 @@ export class OpenAIAnswerer implements Answerer {
       const response = await this.fetchRequest('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
-        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(QUERY_DEADLINE_MS)]),
         body: JSON.stringify({
           model: 'gpt-6-luna',
           reasoning: { effort: 'none' },

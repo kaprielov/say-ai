@@ -1,5 +1,7 @@
 import { QueryError } from './errors.js';
 
+export const QUERY_DEADLINE_MS = 30_000;
+
 // Shared by every query service in this application process.
 export class QueryLimits {
   private active = 0;
