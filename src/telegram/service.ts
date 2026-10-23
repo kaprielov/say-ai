@@ -262,10 +262,10 @@ export class TelegramService {
     if (!quota.rows[0]) throw new QueryError(429, 'daily_limit', 'The daily question limit for this owner has been reached.');
     try {
       const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000));
-      await this.enqueue(db, botId, chat, result.outcome === 'answered' ? result.answer! : 'The knowledge base does not contain enough information to answer this question.');
+      await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : 'I do not have that information. What would you like to know about the subject of this bot?');
     } catch (error) {
       // Keep the quota reservation even when a paid provider request fails.
-      await this.enqueue(db, botId, chat, error instanceof QueryError ? error.message : 'Unable to answer right now. Please try again later.');
+      await this.enqueue(db, botId, chat, error instanceof QueryError && error.status < 500 ? error.message : 'I could not answer just now. Please try your question again shortly.');
     }
   }
 

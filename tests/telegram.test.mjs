@@ -1,3 +1,4 @@
+import { QueryError } from '../src/queries/errors.ts';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -278,4 +279,20 @@ test('bots created without a selected ready base remain paused', async () => {
   assert.equal(bot.enabled, false);
   assert.equal(bot.knowledge_base_id, null);
   assert.ok(calls.some(call => call.method === 'setManagedBotAccessSettings' && call.payload.user_id === 203 && call.payload.is_access_restricted === true));
+});
+
+test('Telegram forwards friendly redirections and hides internal provider validation errors', async () => {
+  const id = await makeBase(23); await ready(id);
+  await deliver(callback(23, `test:${id}`));
+  const original = service;
+  const reply = 'Hi! Would you like to know about delivery or opening hours?';
+  service = new TelegramService(pool, config, api, { async ask() { return { outcome: 'redirected', answer: reply, sources: [] }; } });
+  try {
+    await deliver(message(23, 'Hi!'));
+    assert.equal((await pool.query("SELECT payload->>'text' AS text FROM telegram_outbox WHERE payload->>'chat_id' = '23' ORDER BY id DESC LIMIT 1")).rows[0].text, reply);
+    service = new TelegramService(pool, config, api, { async ask() { throw new QueryError(502, 'invalid_answer_response', 'Internal provider validation detail'); } });
+    await deliver(message(23, 'Another question'));
+    const text = (await pool.query("SELECT payload->>'text' AS text FROM telegram_outbox WHERE payload->>'chat_id' = '23' ORDER BY id DESC LIMIT 1")).rows[0].text;
+    assert.match(text, /try.*again/i); assert.ok(!text.includes('provider')); assert.ok(!text.includes('validation'));
+  } finally { service = original; }
 });

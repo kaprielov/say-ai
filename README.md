@@ -33,6 +33,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | Command | Purpose |
 | --- | --- |
 | `npm run dev` | Start the API with automatic restart on source changes. |
+| `npm run dev:public` | Start Cloudflare Tunnel and the backend, automatically supplying the public URL and refreshing Telegram webhooks. |
 | `npm run build` | Compile application TypeScript into `dist/`. |
 | `npm start` | Run the compiled API. |
 | `npm run db:up` | Start PostgreSQL and wait for its health check. |
@@ -45,6 +46,8 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run test:documents` | Test document extraction capacity, cancellation, and cleanup without database or provider calls. |
 | `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
 | `npm run test:queries` | Test question answering, ownership, retrieval, grounding contracts, concurrency, deadlines, and cancellation in a temporary database. No paid provider calls by default. |
+| `npm run test:telegram` | Verify Telegram ownership, bot lifecycle, durable processing, quotas, and topic redirections with controlled transports. |
+| `npm run test:dev-public` | Verify tunnel startup, public URL injection, and child-process cleanup without real public access. |
 | `npm run test:replacement` | Test content replacement through the API, concurrent submissions, version switching, failure recovery, and old-version availability. Uses a temporary database and controlled providers. |
 
 Compose stores database files in a named volume. Normal stops and restarts preserve it. Run migrations explicitly; application startup does not modify the schema.
@@ -166,7 +169,9 @@ Successful answer, with exact supporting source chunks:
 }
 ```
 
-When the available context cannot support an answer, the API returns `200` with:
+For greetings, capability questions, and questions the evidence cannot answer, the model can return `200` with `outcome: "redirected"`, a friendly reply of up to 280 characters, and source chunks supporting the suggested topics. The reply acknowledges the message or missing information and steers the conversation toward one or two topics covered by the knowledge base. Its sources support those topic suggestions, not an answer to the original unsupported question. The reply uses the user's language.
+
+If no safe topic can be suggested or retrieval is empty, the API returns `200` with:
 
 ```json
 {"outcome":"insufficient_context","answer":null,"sources":[]}
@@ -176,9 +181,9 @@ The question must be non-empty, contain no null characters, and fit within 4096 
 
 Retrieval ranks the closest eight chunks by cosine similarity without a similarity cutoff. It first budgets the strongest three matches, then tries to add their immediate next and previous chunks using at most 1000 additional tokens, and finally fills remaining space with the other ranked matches. Neighbors are fetched only from the captured version of the same knowledge base, even when they did not rank in the top eight. Repeated chunk IDs from overlapping windows are included once; original chunk text and IDs remain unchanged for citations. Neighbor expansion also works for previously ingested versions.
 
-The complete serialized context fits within a 3000-token budget measured with `cl100k_base`. This is a budgeting convention, not the answering model's exact token count. Expansion can displace lower-ranked matches, so its quality must be evaluated on representative questions. If no context is available, the API declines without a generation call. Otherwise, the model assesses whether the passages support an answer and can decline. Similarity determines ranking, not whether a chunk is allowed into the prompt. `RETRIEVAL_MIN_SIMILARITY` is no longer used.
+The complete serialized context fits within a 3000-token budget measured with `cl100k_base`. This is a budgeting convention, not the answering model's exact token count. Expansion can displace lower-ranked matches, so its quality must be evaluated on representative questions. If no context is available, the API declines without a generation call. Otherwise, the model assesses whether the passages support an answer and can redirect or decline. Similarity determines ranking, not whether a chunk is allowed into the prompt. `RETRIEVAL_MIN_SIMILARITY` is no longer used.
 
-Prompts instruct the model to use only supplied evidence and treat questions and source text as untrusted data. Answered responses must cite supplied chunk IDs; missing or invented citations are rejected. Semantic grounding still requires manual quality evaluation; structured output and valid citations alone do not prove every claim is supported.
+Prompts instruct the model to use only supplied evidence and treat questions and source text as untrusted data. Answered responses and topic redirections must cite supplied chunk IDs; missing or invented citations are rejected. Semantic grounding still requires manual quality evaluation; structured output and valid citations alone do not prove every claim is supported.
 
 At most three queries run concurrently across all knowledge bases in one application process. Additional queries receive `429` immediately, without waiting. A single 30-second deadline covers admitted query processing, including token validation, ownership lookup, embedding, retrieval, and generation. Timeout returns `504`, attempts cancellation, and releases the query slot. Client disconnection also attempts cancellation. No provider requests are automatically retried.
 
@@ -196,7 +201,7 @@ Operations still running after cancellation remain counted until they settle. A 
 | `503` | OpenAI credentials are absent or the stored embedding configuration is unsupported. Ingestion can be paused independently of querying. |
 | `504` | The query exceeded its 30-second deadline. |
 
-An insufficient-evidence outcome is a successful `200` refusal, separate from a provider-level safety refusal or processing failure. The application does not persist questions or answers. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
+A redirection or insufficient-evidence outcome is a successful `200` response, separate from a provider-level safety refusal or processing failure. The application does not persist questions or answers. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
 
 To run the optional paid live check using a synthetic knowledge base in a temporary database:
 
@@ -204,7 +209,7 @@ To run the optional paid live check using a synthetic knowledge base in a tempor
 RUN_LIVE_QUERY_TEST=true node --env-file=.env --import tsx --test --test-name-pattern='live GPT-6 Luna' tests/queries.test.mjs
 ```
 
-This smoke test exercises one supported answer and one insufficient-context outcome using the normal retrieval behavior. It is not the full representative quality or concurrent-load evaluation from the implementation plan.
+This smoke test exercises a supported answer, a missing-information redirection, and a greeting using the normal retrieval behavior. It is not the full representative quality or concurrent-load evaluation from the implementation plan.
 
 ## Background ingestion
 
@@ -288,6 +293,6 @@ The persistent outbox retries message delivery up to five times and honors Teleg
 
 External API calls and PostgreSQL cannot commit atomically. An interruption after Telegram accepts an outgoing message but before its deletion from the outbox can duplicate that message. A crash after an AI request but before the update transaction commits can repeat the provider request and its charges. The current worker is intentionally sequential, so a slow question delays other Telegram requests; scale this before serving sustained traffic. Telegram's update retention also limits recovery from prolonged downtime.
 
-`TELEGRAM_DAILY_QUERY_LIMIT` defaults to 100 admitted questions per owner per database calendar day, shared across customer bots and manager tests. Provider failures consume the allowance. This is an application allowance, not an exact currency budget. Telegram users can hold at most 20 knowledge bases. Ingestion uses the existing durable worker and provider limits; updates continue serving the previous ready version. Conversation history is not supplied to the model.
+`TELEGRAM_DAILY_QUERY_LIMIT` defaults to 100 admitted questions per owner per database calendar day, shared across customer bots and manager tests. Provider failures consume the allowance. This is an application allowance, not an exact currency budget. Telegram users can hold at most 20 knowledge bases. Ingestion uses the existing durable worker and provider limits; updates continue serving the previous ready version. Conversation history is not supplied to the model. Greetings and unsupported questions receive short topic redirections when the context supports them. Telegram displays a neutral retry message for internal provider or answer-validation failures; technical details remain in the HTTP API error contract.
 
 Run `npm run test:telegram` for isolated-database integration tests with controlled Telegram and answer transports. No real Telegram or paid OpenAI requests are made by these tests.

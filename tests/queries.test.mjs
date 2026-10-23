@@ -388,7 +388,7 @@ test('Responses adapter requests GPT-6 Luna structured output without reasoning,
   }
 });
 
-test('live GPT-6 Luna answers a supported question and refuses an unsupported one', {
+test('live GPT-6 Luna answers supported questions and redirects greetings and missing information', {
   skip: process.env.RUN_LIVE_QUERY_TEST !== 'true',
 }, async () => {
   const key = process.env.OPENAI_API_KEY;
@@ -402,7 +402,8 @@ test('live GPT-6 Luna answers a supported question and refuses an unsupported on
   }));
   for (const [question, outcome] of [
     ['How long does Velora retain audit logs?', 'answered'],
-    ["What is Velora's monthly subscription price?", 'insufficient_context'],
+    ["What is Velora's monthly subscription price?", 'redirected'],
+    ['Hi!', 'redirected'],
   ]) {
     const started = performance.now();
     const response = await query(url, kb.kbId, { question });
@@ -410,7 +411,32 @@ test('live GPT-6 Luna answers a supported question and refuses an unsupported on
     assert.equal(response.status, 200, JSON.stringify(body));
     assert.equal(body.outcome, outcome);
     if (outcome === 'answered') { assert.match(body.answer, /37/); assert.equal(body.sources[0].chunk_id, kb.chunkId); }
-    else assert.equal(body.answer, null);
+    else { assert.ok(body.answer.length <= 280); assert.equal(body.sources[0].chunk_id, kb.chunkId); }
     console.log(`Live query ${outcome}: ${Math.round(performance.now() - started)} ms`);
+  }
+});
+
+test('short conversational redirections cite suggested topics without claiming to answer the original question', async () => {
+  const kb = await readyKnowledgeBase({ text: 'The comic shop has opening hours and delivery options.' });
+  const reply = 'Hi! I can help with the shop hours or delivery. What would you like to know?';
+  const url = await startApp(service({ answerer: { answer: async () => ({ outcome: 'redirected', answer: reply, chunk_ids: [kb.chunkId] }) } }));
+  const response = await query(url, kb.kbId, { question: 'Hello!' });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.outcome, 'redirected'); assert.equal(body.answer, reply);
+  assert.equal(body.sources[0].chunk_id, kb.chunkId);
+});
+
+test('redirections reject invented topic citations, missing citations, and overly long replies', async () => {
+  const kb = await readyKnowledgeBase();
+  for (const generated of [
+    { outcome: 'redirected', answer: 'Ask me about prices.', chunk_ids: ['invented'] },
+    { outcome: 'redirected', answer: 'Ask me something else.', chunk_ids: [] },
+    { outcome: 'redirected', answer: 'x'.repeat(281), chunk_ids: [kb.chunkId] },
+    { outcome: 'answered', answer: 'Hello!', chunk_ids: [] },
+  ]) {
+    const url = await startApp(service({ answerer: { answer: async () => generated } }));
+    const response = await query(url, kb.kbId, { question: 'Hello!' });
+    assert.equal(response.status, 502);
   }
 });

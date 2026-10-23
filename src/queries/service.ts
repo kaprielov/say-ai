@@ -95,12 +95,15 @@ export class QuestionAnswering {
       throw new QueryError(502, 'invalid_answer_response', 'The answering provider returned an invalid response.');
     }
     if (result.outcome === 'insufficient_context' && result.answer === null && result.chunk_ids.length === 0) return refusal();
-    if (result.outcome !== 'answered' || typeof result.answer !== 'string' || !result.answer.trim() ||
+    if (!['answered', 'redirected'].includes(result.outcome) || typeof result.answer !== 'string' || !result.answer.trim() ||
         !result.chunk_ids.length || result.chunk_ids.some(id => !context.some(chunk => chunk.id === id))) {
       throw new QueryError(502, 'invalid_answer_response', 'The answering provider returned an unsupported answer.');
     }
+    if (result.outcome === 'redirected' && [...result.answer].length > 280) {
+      throw new QueryError(502, 'invalid_answer_response', 'The answering provider returned an oversized redirection.');
+    }
     return {
-      outcome: 'answered' as const, answer: result.answer,
+      outcome: result.outcome as 'answered' | 'redirected', answer: result.answer,
       sources: [...new Set(result.chunk_ids)].map(id => ({ chunk_id: id, text: context.find(chunk => chunk.id === id)!.text })),
     };
   }

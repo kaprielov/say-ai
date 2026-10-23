@@ -1,22 +1,87 @@
 # RAG API: system design notes
 
-Status: MVP requirements, API draft, data flows, recovery policy, query limits, proposed architecture, and initial evaluation approach recorded. Technology choices and some implementation details remain open.
+Status: RAG API and a Telegram interface are implemented. The current implementation below is authoritative; the numbered sections preserve the original design discussion and may describe superseded proposals.
 
 Updated: 23 October 2026.
 
 ### Current implementation
 
-The API now uses Node.js, TypeScript, Express, and PostgreSQL with pgvector. It supports API-key authentication, owner-scoped knowledge-base creation/status, and background ingestion within one application instance. The remaining sections preserve the design discussion; suggestions below are not all implemented.
+The API now uses Node.js, TypeScript, Express, and PostgreSQL with pgvector. It supports developer API-key authentication, Telegram user ownership, knowledge-base creation/status/replacement, document uploads, question answering, and managed Telegram bots within one application instance. Both entry points call shared application services; no frontend or Mini App is required.
 
 Ingestion uses OpenAI `text-embedding-3-small` with 1536 dimensions by default, configurable for future versions. The `paragraph-sentence-v1` strategy keeps paragraphs separate within 512 `cl100k_base` tokens. Long paragraphs split at sentence boundaries with up to 64 tokens of whole-sentence overlap; oversized sentences fall back to Unicode-safe hard splits and bounded overlap. Separate paragraphs do not overlap. Text remains an exact source substring. The worker embeds sequential batches of 16 and stores model/dimensions/configuration with each attempt version. Existing content must be resubmitted to use the new chunking strategy. Activation and task completion commit atomically. An exclusive database advisory lock protects startup recovery and enforces a single ingestion worker. Partial failed versions are deleted; successful versions are retained.
 
 Transient ingestion failures allow three persisted attempts total, separated by 10 seconds and 60 seconds. Interrupted attempts count toward that total; permanent provider errors fail immediately. Each provider request is bounded by 30 seconds and each attempt by ten minutes. These are implementation defaults, not evidence that the one-hour freshness target has been met.
 
-Question answering is implemented at `POST /knowledge-bases/{id}/queries`, using the captured ready version's embedding configuration and exact cosine retrieval. It ranks eight chunks without a similarity cutoff. Context selection first budgets the three strongest matches, expands them with their next and previous chunks from that same version and knowledge base using at most 1000 additional tokens, and then tries remaining matches. Duplicate chunk IDs are removed; citation text remains unchanged. The complete serialized context stays within 3000 `cl100k_base` tokens. Neighbor expansion applies to existing versions as well. The initial `0.6` filter was removed after it rejected useful opening-hours evidence scoring about `0.37`; the model now assesses answerability from the retrieved context. The selected answering model is GPT-6 Luna through the Responses API, with reasoning disabled, structured answers/refusals, source chunk IDs, response storage disabled, and an output cap of 768 tokens. Unsupported questions return an explicit insufficient-context outcome; model citations are checked against supplied chunks.
+Question answering is implemented at `POST /knowledge-bases/{id}/queries`, using the captured ready version's embedding configuration and exact cosine retrieval. It ranks eight chunks without a similarity cutoff. Context selection first budgets the three strongest matches, expands them with their next and previous chunks from that same version and knowledge base using at most 1000 additional tokens, and then tries remaining matches. Duplicate chunk IDs are removed; citation text remains unchanged. The complete serialized context stays within 3000 `cl100k_base` tokens. Neighbor expansion applies to existing versions as well. The initial `0.6` filter was removed after it rejected useful opening-hours evidence scoring about `0.37`; the model now assesses answerability from the retrieved context. The selected answering model is GPT-6 Luna through the Responses API, with reasoning disabled, structured answers/refusals, source chunk IDs, response storage disabled, and an output cap of 768 tokens. Responses distinguish grounded answers, short topic redirections, and insufficient context; model citations are checked against supplied chunks. The response contract is described below.
 
-An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A 30-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. One synthetic live answer/refusal smoke test has passed; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated.
+An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A 30-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. Synthetic live checks have passed for a supported answer, a greeting, and a missing-information redirection; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated.
 
 Content replacement is implemented at `PUT /knowledge-bases/{id}/content`. It checks ownership, locks the knowledge-base row, and durably saves the complete replacement text and a pending task before returning `202`. The existing partial unique index prevents overlapping pending/processing submissions, which return `409` with `ingestion_in_progress`. Submission timestamps are recorded after acquiring the row lock. Replacement leaves the active version unchanged until the ingestion activation transaction succeeds; existing queries keep their captured version, and terminal failure preserves the previous ready version. A new submission is allowed after terminal failure. Validation, concurrent acceptance, recovery, rollback, and version availability are covered by API/database tests.
+
+### Telegram interface and ownership
+
+The service operates one manager bot and its users' managed bots. A user creates a named knowledge base, sends a supported document or text, receives an ingestion notification, tests answers, and creates a Telegram bot through a native Telegram dialog. The manager requires Bot Management Mode in BotFather. User confirmation creates the bot account; the manager receives `managed_bot`, retrieves its token, verifies its identity, and registers a webhook. End users never copy child bot tokens.
+
+The HTTP developer key maps to `DEVELOPER_OWNER_ID`. Telegram management derives the owner as `telegram:<numeric-user-id>` from authenticated Telegram updates. Every base and bot management action checks this owner. Customer questions resolve the base and its owner from the registered child bot; customer IDs cannot choose or override ownership. A composite database foreign key also prevents binding a bot to another owner's base. This release handles private chats only.
+
+New bots with a selected ready base start enabled and accessible to customers. Creation without a selected ready base leaves the bot paused and restricted to its owner. Explicit pauses survive token refreshes. Changing the selected base pauses answers until re-enabled. An owner transfer detaches the previous base, pauses answers, restricts access to the new owner, and discards queued replies from the previous owner. Base deletion requires ingestion to finish, removes its content, and pauses and disconnects associated bots.
+
+### Implemented architecture
+
+```mermaid
+flowchart LR
+    Owner[Telegram owner] --> Manager[Manager bot]
+    Customer[Telegram customer] --> Child[Managed bot]
+    Manager --> Hooks[Authenticated webhooks]
+    Child --> Hooks
+    Developer[Developer client] --> HTTP[Bearer-authenticated API]
+    Hooks --> Updates[(PostgreSQL update queue)]
+    Updates --> Worker[Telegram worker]
+    Worker --> Services[Shared knowledge-base and query services]
+    HTTP --> Services
+    Services --> DB[(PostgreSQL and pgvector)]
+    Ingestion[Ingestion worker] --> DB
+    Ingestion --> Embeddings[Embedding provider]
+    Services --> Embeddings
+    Services --> Model[Answering model]
+    Worker --> Outbox[(PostgreSQL outbox)]
+    Outbox --> Delivery[Telegram Bot API]
+```
+
+Telegram adds these durable tables to the original knowledge-base/version/chunk/task model:
+
+| Table | Purpose |
+| --- | --- |
+| `telegram_sessions` | Current management step, selected base, and draft name for each user. |
+| `telegram_bots` | Bot identity, owner, selected base, enabled state, AES-256-GCM encrypted token, and webhook secret. |
+| `telegram_updates` | Incoming update payload, retry state, and unique `(bot_id, update_id)` delivery identity. Completed payloads are cleared. |
+| `telegram_outbox` | Committed outgoing messages and Telegram API calls with delivery retries. |
+| `telegram_notifications` | Ingestion tasks awaiting a completion or failure notification. |
+| `telegram_usage` | Daily admitted question counts shared across each owner's bots and manager tests. |
+
+Webhooks verify their secret header before parsing and acknowledge only after persisting the update. One Telegram worker holds its own advisory lock and processes updates in arrival order. Source changes, session changes, outgoing replies, and update completion share a transaction. Transient processing failures receive up to three attempts; a delayed update holds later work. The outbox makes up to five delivery attempts and honors Telegram rate-limit delays. Permanent credential failures can pause the affected child without disabling other bots. PostgreSQL commits and external API calls are not atomic: a crash can duplicate message delivery or a provider call and its charges.
+
+The Telegram worker is sequential; the RAG service still has its separate global query admission limit. A slow Telegram question delays other Telegram updates. Use one application instance with these workers enabled. Telegram owners can hold up to 20 bases. The daily question allowance defaults to 100 per owner per database calendar day, including admitted provider failures. This is an application quota, not an exact monetary budget. Ingestion has its existing retry and timeout bounds; conversation history is not sent to the answering model.
+
+### Answer behavior
+
+| Outcome | Behavior | Source validation |
+| --- | --- | --- |
+| `answered` | A factual answer supported by the retrieved evidence. | Requires supplied chunk IDs supporting the answer. |
+| `redirected` | A greeting, capability reply, or acknowledgment of missing information followed by one or two useful topics from the base. | Requires supplied chunk IDs supporting the suggested topics, rather than the original unsupported question. Replies above 280 Unicode code points are rejected. |
+| `insufficient_context` | No safe topic can be suggested, or retrieval is empty. Returns `answer: null` and no sources. | Empty retrieval avoids a generation call. |
+
+Prompts request the user's language and at most two short sentences for a redirection. They prohibit inventing an answer to an unsupported question. Valid citations check source identity, not semantic truth; representative review is still necessary. Telegram forwards valid answers and redirections, supplies a brief fallback for insufficient context, and replaces internal generation/validation failures with a neutral retry message. The HTTP API retains its explicit processing errors.
+
+### Development publication and verification
+
+`npm run dev:public` starts a Cloudflare Quick Tunnel, waits for its URL and connection, then launches the backend with `TELEGRAM_PUBLIC_URL` injected into its environment. It does not rewrite `.env`. Ctrl+C stops both processes. On startup, the backend registers the manager and every stored child bot webhook with the current public URL, so restarting a temporary tunnel does not require manual URL copying or webhook updates. Webhook and token-encryption secrets remain stable in `.env`; the daily quota is optional. See [README setup](README.md#telegram-interface).
+
+A real development tunnel, public health endpoint, manager webhook registration, and rejection of unsigned webhook requests have been checked. A real managed bot was created and answered a store-hours question. Automated Telegram tests use controlled transports and isolated databases, including ownership, automatic activation, pause preservation, transfer, retries, and topic redirections. A synthetic live RAG check verifies supported answers and greeting/missing-information redirections. Sustained traffic, representative multilingual quality, and production availability remain unevaluated.
+
+## Original design discussion
+
+The numbered sections below record the initial developer-API scope and the options considered before Telegram management and conversational redirection were implemented. Statements that an implementation choice remains open or Telegram operation is out of scope describe that earlier stage. Use the current implementation above and the README for present behavior.
 
 ## 1. Context and scope
 
