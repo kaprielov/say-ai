@@ -1,3 +1,4 @@
+import { translator, type Language } from './i18n.js';
 import { randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { createKnowledgeBase, replaceKnowledgeBase } from '../knowledge-bases/service.js';
@@ -19,7 +20,7 @@ export type Update = {
   callback_query?: { id: string; from: User; message?: Message; data?: string };
   managed_bot?: { user: User; bot: User };
 };
-type Session = { state: string; knowledge_base_id: string | null; draft_name: string | null };
+type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null };
 type Bot = { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ownerId = (id: number) => `telegram:${id}`;
@@ -27,6 +28,16 @@ const buttons = (rows: [string, string][][]) => ({ inline_keyboard: rows.map(row
 
 export class TelegramService {
   constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>) {}
+
+  async locale(db: PoolClient, user: number | string) {
+    const row = (await db.query<{ language: Language | null }>('SELECT language FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
+    return translator(row?.language ?? 'en');
+  }
+
+  async chooseLanguage(db: PoolClient, user: number) {
+    await this.enqueue(db, this.config.managerId, user, 'Choose your language / Выберите язык',
+      buttons([[['English', 'lang:en'], ['Русский', 'lang:ru']]]));
+  }
 
   async token(botId: string) {
     if (botId === this.config.managerId) return this.config.token;
@@ -52,61 +63,67 @@ export class TelegramService {
   }
 
   async base(db: PoolClient, user: number, id: string) {
-    if (!uuid.test(id)) throw new QueryError(404, 'not_found', 'Knowledge base not found.');
+    const t = await this.locale(db, user);
+    if (!uuid.test(id)) throw new QueryError(404, 'not_found', t('Knowledge base not found.'));
     const result = await db.query(`
       SELECT kb.*, latest.status FROM knowledge_bases kb
       LEFT JOIN LATERAL (SELECT status FROM ingestion_tasks WHERE knowledge_base_id = kb.id
         ORDER BY created_at DESC, id DESC LIMIT 1) latest ON true
       WHERE kb.id = $1 AND kb.owner_id = $2
     `, [id, ownerId(user)]);
-    if (!result.rows[0]) throw new QueryError(404, 'not_found', 'Knowledge base not found.');
+    if (!result.rows[0]) throw new QueryError(404, 'not_found', t('Knowledge base not found.'));
     return result.rows[0];
   }
 
   async bot(db: PoolClient, user: number, id: string) {
-    if (!/^\d{1,16}$/.test(id)) throw new QueryError(404, 'not_found', 'Bot not found.');
+    const t = await this.locale(db, user);
+    if (!/^\d{1,16}$/.test(id)) throw new QueryError(404, 'not_found', t('Bot not found.'));
     const result = await db.query<Bot>('SELECT * FROM telegram_bots WHERE id = $1 AND owner_id = $2', [id, ownerId(user)]);
-    if (!result.rows[0]) throw new QueryError(404, 'not_found', 'Bot not found.');
+    if (!result.rows[0]) throw new QueryError(404, 'not_found', t('Bot not found.'));
     return result.rows[0];
   }
 
   async menu(db: PoolClient, user: number) {
+    const t = await this.locale(db, user);
     await this.session(db, user, 'menu');
-    await this.enqueue(db, this.config.managerId, user, 'Manage your knowledge bases and Telegram bots.', buttons([
-      [['Create knowledge base', 'new']], [['My knowledge bases', 'bases:0'], ['My bots', 'bots:0']],
+    await this.enqueue(db, this.config.managerId, user, t('Manage your knowledge bases and Telegram bots.'), buttons([
+      [[t('Create knowledge base'), 'new']], [[t('My knowledge bases'), 'bases:0'], [t('My bots'), 'bots:0']], [[t('Language'), 'language']],
     ]));
   }
 
   async list(db: PoolClient, user: number, kind: 'bases' | 'bots', page = 0, bindBot?: string) {
+    const t = await this.locale(db, user);
     const offset = Math.min(10000, Math.max(0, page)) * 8;
     const rows = kind === 'bases'
       ? (await db.query('SELECT id, name AS label FROM knowledge_bases WHERE owner_id = $1 ORDER BY created_at, id LIMIT 9 OFFSET $2', [ownerId(user), offset])).rows
       : (await db.query('SELECT id, username AS label FROM telegram_bots WHERE owner_id = $1 ORDER BY id LIMIT 9 OFFSET $2', [ownerId(user), offset])).rows;
     const prefix = bindBot ? 'bind' : kind === 'bases' ? 'kb' : 'bot';
     const items: [string, string][][] = rows.slice(0, 8).map(row => [[String(row.label).slice(0, 60), `${prefix}:${row.id}`]]);
-    if (page > 0) items.push([['Previous', `${kind}:${page - 1}`]]);
-    if (rows.length > 8) items.push([['Next', `${kind}:${page + 1}`]]);
-    items.push([['Main menu', 'menu']]);
-    await this.enqueue(db, this.config.managerId, user, rows.length ? (bindBot ? 'Choose a knowledge base for this bot.' : 'Choose an item.') : 'No items yet.', buttons(items));
+    if (page > 0) items.push([[t('Previous'), `${kind}:${page - 1}`]]);
+    if (rows.length > 8) items.push([[t('Next'), `${kind}:${page + 1}`]]);
+    items.push([[t('Main menu'), 'menu']]);
+    await this.enqueue(db, this.config.managerId, user, rows.length ? (bindBot ? t('Choose a knowledge base for this bot.') : t('Choose an item.')) : t('No items yet.'), buttons(items));
   }
 
   async showBase(db: PoolClient, user: number, id: string) {
+    const t = await this.locale(db, user);
     const kb = await this.base(db, user, id);
     await this.session(db, user, 'selected', id);
     await this.enqueue(db, this.config.managerId, user,
-      `${kb.name}\nStatus: ${kb.status ?? 'pending'}\nAnswers available: ${kb.active_version_id ? 'yes' : 'no'}`,
+      t('{name}\nStatus: {status}\nAnswers available: {available}', { name: kb.name, status: t(kb.status ?? 'pending'), available: t(kb.active_version_id ? 'yes' : 'no') }),
       buttons([
-        [['Refresh status', `kb:${id}`], ['Test answers', `test:${id}`]],
-        [['Replace content', `replace:${id}`], ['Rename', `rename:${id}`]],
-        [['Create Telegram bot', `create:${id}`]], [['Delete knowledge base', `delete:${id}`]], [['Main menu', 'menu']],
+        [[t('Refresh status'), `kb:${id}`], [t('Test answers'), `test:${id}`]],
+        [[t('Replace content'), `replace:${id}`], [t('Rename'), `rename:${id}`]],
+        [[t('Create Telegram bot'), `create:${id}`]], [[t('Delete knowledge base'), `delete:${id}`]], [[t('Main menu'), 'menu']],
       ]));
   }
 
   async showBot(db: PoolClient, user: number, id: string) {
+    const t = await this.locale(db, user);
     const bot = await this.bot(db, user, id);
     await this.enqueue(db, this.config.managerId, user,
-      `@${bot.username}\nAnswers: ${bot.enabled ? 'enabled' : 'paused'}\nKnowledge base: ${bot.knowledge_base_id ? (await this.base(db, user, bot.knowledge_base_id)).name : 'not selected'}\nhttps://t.me/${bot.username}`,
-      buttons([[['Choose knowledge base', `choose:${id}`]], [[bot.enabled ? 'Pause answers' : 'Publish / enable answers', `toggle:${id}`]], [['Main menu', 'menu']]]));
+      t('@{username}\nAnswers: {status}\nKnowledge base: {base}\nhttps://t.me/{username}', { username: bot.username, status: t(bot.enabled ? 'enabled' : 'paused'), base: bot.knowledge_base_id ? (await this.base(db, user, bot.knowledge_base_id)).name : t('not selected') }),
+      buttons([[[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Main menu'), 'menu']]]));
   }
 
   async handle(db: PoolClient, botId: string, update: Update) {
@@ -119,6 +136,7 @@ export class TelegramService {
     const user = callback?.from ?? message?.from;
     // Management and answering are private-chat-only in this release.
     if (!message || !user || user.is_bot || message.chat.type !== 'private' || message.chat.id !== user.id) return;
+    const t = botId === this.config.managerId ? await this.locale(db, user.id) : translator();
     if (botId !== this.config.managerId) {
       const bot = (await db.query<Bot>('SELECT * FROM telegram_bots WHERE id = $1', [botId])).rows[0];
       if (!bot?.enabled || !bot.knowledge_base_id) {
@@ -130,41 +148,61 @@ export class TelegramService {
       }
       return;
     }
-    if (callback?.data) return this.action(db, user.id, callback.data);
     const text = message.text;
-    if (text && ['/start', '/menu', '/cancel', '/help'].includes(text.split(' ')[0]!)) return this.menu(db, user.id);
+    const command = text?.split(' ')[0];
+    if (callback?.data === 'language' || command === '/language') return this.chooseLanguage(db, user.id);
+    if (callback?.data?.startsWith('lang:')) {
+      const language = callback.data.slice(5);
+      if (language !== 'en' && language !== 'ru') return this.chooseLanguage(db, user.id);
+      await db.query(`INSERT INTO telegram_sessions (user_id, language) VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET language = $2, updated_at = now()`, [user.id, language]);
+      const selected = translator(language);
+      await this.enqueue(db, botId, user.id, selected('Language saved.'), { remove_keyboard: true });
+      await db.query("INSERT INTO telegram_outbox (bot_id, method, payload) VALUES ($1, 'setMyCommands', $2)", [botId, {
+        scope: { type: 'chat', chat_id: user.id },
+        commands: [
+          { command: 'start', description: selected('Open the main menu') },
+          { command: 'help', description: selected('Show available actions') },
+          { command: 'cancel', description: selected('Cancel and return to the menu') },
+          { command: 'language', description: selected('Change interface language') },
+        ],
+      }]);
+      return this.menu(db, user.id);
+    }
     const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id = $1', [user.id])).rows[0];
-    if (!session) return this.menu(db, user.id);
+    if (!session?.language) return this.chooseLanguage(db, user.id);
+    if (callback?.data) return this.action(db, user.id, callback.data);
+    if (command && ['/start', '/menu', '/cancel', '/help'].includes(command)) return this.menu(db, user.id);
     if (session.state === 'name' || session.state === 'rename') {
-      if (!text?.trim() || text.trim().length > 80 || text.includes('\0')) throw new QueryError(400, 'invalid_name', 'Send a name between 1 and 80 characters.');
+      if (!text?.trim() || text.trim().length > 80 || text.includes('\0')) throw new QueryError(400, 'invalid_name', t('Send a name between 1 and 80 characters.'));
       if (session.state === 'rename') {
         await this.base(db, user.id, session.knowledge_base_id!);
         await db.query('UPDATE knowledge_bases SET name = $1 WHERE id = $2 AND owner_id = $3', [text.trim(), session.knowledge_base_id, ownerId(user.id)]);
         return this.showBase(db, user.id, session.knowledge_base_id!);
       }
       await this.session(db, user.id, 'upload', null, text.trim());
-      await this.enqueue(db, botId, user.id, 'Send one file (up to 1 MiB) or paste the knowledge-base text. Supported: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Use /cancel to return to the menu.');
+      await this.enqueue(db, botId, user.id, t('Send one file (up to 1 MiB) or paste the knowledge-base text. Supported: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Use /cancel to return to the menu.'));
       return;
     }
     if (session.state === 'upload' || session.state === 'replace') {
       let content = text;
       if (message.document) {
         const file = message.document;
-        if ((file.file_size ?? 0) > 1024 * 1024) throw new QueryError(413, 'payload_too_large', 'File must not exceed 1 MiB.');
+        if ((file.file_size ?? 0) > 1024 * 1024) throw new QueryError(413, 'payload_too_large', t('File must not exceed 1 MiB.'));
         content = await decodeSource(await this.api.download(this.config.token, file.file_id), file.file_name ?? '');
       }
       const source = sourceText({ text: content });
-      if (Buffer.byteLength(source) > 1024 * 1024) throw new QueryError(413, 'payload_too_large', 'Text must not exceed 1 MiB.');
+      if (Buffer.byteLength(source) > 1024 * 1024) throw new QueryError(413, 'payload_too_large', t('Text must not exceed 1 MiB.'));
       if (session.state === 'upload') {
         const count = await db.query('SELECT count(*)::int AS count FROM knowledge_bases WHERE owner_id = $1', [ownerId(user.id)]);
-        if (count.rows[0].count >= 20) throw new QueryError(429, 'base_limit', 'You can create up to 20 knowledge bases.');
+        if (count.rows[0].count >= 20) throw new QueryError(429, 'base_limit', t('You can create up to 20 knowledge bases.'));
       }
       const result = session.state === 'replace'
         ? await replaceKnowledgeBase(db, ownerId(user.id), session.knowledge_base_id!, source)
         : await createKnowledgeBase(db, ownerId(user.id), source, session.draft_name!);
       await db.query('INSERT INTO telegram_notifications (task_id, chat_id) VALUES ($1, $2)', [result.taskId, user.id]);
       await this.session(db, user.id, 'selected', result.id);
-      await this.enqueue(db, botId, user.id, 'Content accepted. Processing will continue in the background; you will receive a notification.', buttons([[['View knowledge base', `kb:${result.id}`]]]));
+      await this.enqueue(db, botId, user.id, t('Content accepted. Processing will continue in the background; you will receive a notification.'), buttons([[[t('View knowledge base'), `kb:${result.id}`]]]));
       return;
     }
     if (session.state === 'create_bot' && session.knowledge_base_id) {
@@ -175,23 +213,25 @@ export class TelegramService {
       await this.base(db, user.id, session.knowledge_base_id);
       return this.answer(db, botId, user.id, ownerId(user.id), session.knowledge_base_id, text);
     }
-    await this.enqueue(db, botId, user.id, 'Use the menu buttons, or /cancel to return to the main menu.');
+    await this.enqueue(db, botId, user.id, t('Use the menu buttons, or /cancel to return to the main menu.'));
   }
 
   async promptBotCreation(db: PoolClient, user: number, name: string) {
+    const t = await this.locale(db, user);
     return this.enqueue(db, this.config.managerId, user,
-      'Tap "Create Telegram bot" below the message field to continue. You do not need to send a message.\n\nTelegram will open a window where you can choose your bot\'s name and username. Your bot will be ready to answer as soon as it is created.', {
-        keyboard: [[{ text: 'Create Telegram bot', request_managed_bot: { request_id: 1, suggested_name: name.slice(0, 64) } }]],
-        resize_keyboard: true, one_time_keyboard: true, input_field_placeholder: 'Tap Create Telegram bot below',
+      t('Tap "Create Telegram bot" below the message field to continue. You do not need to send a message.\n\nTelegram will open a window where you can choose your bot\'s name and username. Your bot will be ready to answer as soon as it is created.'), {
+        keyboard: [[{ text: t('Create Telegram bot'), request_managed_bot: { request_id: 1, suggested_name: name.slice(0, 64) } }]],
+        resize_keyboard: true, one_time_keyboard: true, input_field_placeholder: t('Tap Create Telegram bot below'),
       });
   }
 
   async action(db: PoolClient, user: number, data: string) {
+    const t = await this.locale(db, user);
     const [action, id = ''] = data.split(':');
     if (action === 'menu') return this.menu(db, user);
     if (action === 'new') {
       await this.session(db, user, 'name');
-      return this.enqueue(db, this.config.managerId, user, 'What is the name of your knowledge base?');
+      return this.enqueue(db, this.config.managerId, user, t('What is the name of your knowledge base?'));
     }
     if (action === 'bases' || action === 'bots') {
       const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
@@ -206,7 +246,7 @@ export class TelegramService {
     if (action === 'bind') {
       await this.base(db, user, id);
       const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
-      if (session?.state !== 'bind') throw new QueryError(409, 'expired_action', 'Choose the bot again from My bots.');
+      if (session?.state !== 'bind') throw new QueryError(409, 'expired_action', t('Choose the bot again from My bots.'));
       const bot = await this.bot(db, user, session.draft_name!);
       await db.query('UPDATE telegram_bots SET knowledge_base_id = $1, enabled = false WHERE id = $2', [id, bot.id]);
       await this.session(db, user, 'menu');
@@ -214,10 +254,10 @@ export class TelegramService {
     }
     if (action === 'toggle') {
       const bot = await this.bot(db, user, id);
-      if (!bot.enabled && !bot.knowledge_base_id) throw new QueryError(409, 'missing_base', 'Choose a knowledge base first.');
+      if (!bot.enabled && !bot.knowledge_base_id) throw new QueryError(409, 'missing_base', t('Choose a knowledge base first.'));
       if (!bot.enabled) {
         const kb = await this.base(db, user, bot.knowledge_base_id!);
-        if (!kb.active_version_id) throw new QueryError(409, 'not_ready', 'Wait until the knowledge base is ready.');
+        if (!kb.active_version_id) throw new QueryError(409, 'not_ready', t('Wait until the knowledge base is ready.'));
         await this.api.call(decryptToken(bot.token_ciphertext, this.config.encryptionKey), 'getMe');
         await this.api.call(this.config.token, 'setManagedBotAccessSettings', { user_id: Number(id), is_access_restricted: false });
       }
@@ -228,18 +268,18 @@ export class TelegramService {
     if (action === 'kb') return this.showBase(db, user, id);
     if (action === 'replace' || action === 'rename' || action === 'test') {
       await this.session(db, user, action, id);
-      return this.enqueue(db, this.config.managerId, user, action === 'replace' ? 'Send a file or text to replace the complete content. The previous ready version stays available during processing.' : action === 'rename' ? 'Send the new name.' : 'Send a question to test this knowledge base. Use /cancel when finished.');
+      return this.enqueue(db, this.config.managerId, user, action === 'replace' ? t('Send a file or text to replace the complete content. The previous ready version stays available during processing.') : action === 'rename' ? t('Send the new name.') : t('Send a question to test this knowledge base. Use /cancel when finished.'));
     }
     if (action === 'create') {
-      if (!kb.active_version_id) throw new QueryError(409, 'not_ready', 'Wait until the knowledge base is ready.');
+      if (!kb.active_version_id) throw new QueryError(409, 'not_ready', t('Wait until the knowledge base is ready.'));
       await this.session(db, user, 'create_bot', id);
       return this.promptBotCreation(db, user, kb.name);
     }
-    if (action === 'delete') return this.enqueue(db, this.config.managerId, user, `Delete ${kb.name} and its content permanently? Connected bots will be paused.`, buttons([[['Delete permanently', `confirmdelete:${id}`]], [['Cancel', `kb:${id}`]]]));
+    if (action === 'delete') return this.enqueue(db, this.config.managerId, user, t('Delete {name} and its content permanently? Connected bots will be paused.', { name: kb.name }), buttons([[[t('Delete permanently'), `confirmdelete:${id}`]], [[t('Cancel'), `kb:${id}`]]]));
     if (action === 'confirmdelete') {
       await db.query('SELECT id FROM knowledge_bases WHERE id = $1 AND owner_id = $2 FOR UPDATE', [id, ownerId(user)]);
       const busy = await db.query("SELECT id FROM ingestion_tasks WHERE knowledge_base_id = $1 AND status IN ('pending', 'processing')", [id]);
-      if (busy.rows.length) throw new QueryError(409, 'ingestion_in_progress', 'Wait for content processing to finish before deleting this knowledge base.');
+      if (busy.rows.length) throw new QueryError(409, 'ingestion_in_progress', t('Wait for content processing to finish before deleting this knowledge base.'));
       await db.query('UPDATE telegram_bots SET knowledge_base_id = NULL, enabled = false WHERE knowledge_base_id = $1', [id]);
       await db.query('DELETE FROM telegram_notifications WHERE task_id IN (SELECT id FROM ingestion_tasks WHERE knowledge_base_id = $1)', [id]);
       await db.query('UPDATE knowledge_bases SET active_version_id = NULL WHERE id = $1', [id]);
@@ -252,24 +292,26 @@ export class TelegramService {
   }
 
   async answer(db: PoolClient, botId: string, chat: number, owner: string, kb: string, question: string) {
-    if (!question.trim() || question.includes('\0') || question.length > 4096) throw new QueryError(400, 'invalid_question', 'Send a question between 1 and 4096 characters.');
-    if (!this.questions) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
+    const t = botId === this.config.managerId ? await this.locale(db, chat) : translator();
+    if (!question.trim() || question.includes('\0') || question.length > 4096) throw new QueryError(400, 'invalid_question', t('Send a question between 1 and 4096 characters.'));
+    if (!this.questions) throw new QueryError(503, 'querying_unavailable', t('Question answering is not configured.'));
     const quota = await db.query(`
       INSERT INTO telegram_usage (owner_id, queries) VALUES ($1, 1)
       ON CONFLICT (owner_id, day) DO UPDATE SET queries = telegram_usage.queries + 1
       WHERE telegram_usage.queries < $2 RETURNING queries
     `, [owner, this.config.dailyQueries]);
-    if (!quota.rows[0]) throw new QueryError(429, 'daily_limit', 'The daily question limit for this owner has been reached.');
+    if (!quota.rows[0]) throw new QueryError(429, 'daily_limit', t('The daily question limit for this owner has been reached.'));
     try {
       const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000));
-      await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : 'I do not have that information. What would you like to know about the subject of this bot?');
+      await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?'));
     } catch (error) {
       // Keep the quota reservation even when a paid provider request fails.
-      await this.enqueue(db, botId, chat, error instanceof QueryError && error.status < 500 ? error.message : 'I could not answer just now. Please try your question again shortly.');
+      await this.enqueue(db, botId, chat, error instanceof QueryError && error.status < 500 ? t(error.message) : t('I could not answer just now. Please try your question again shortly.'));
     }
   }
 
   async managed(db: PoolClient, event: NonNullable<Update['managed_bot']>) {
+    const t = await this.locale(db, event.user.id);
     if (!Number.isSafeInteger(event.user.id) || !Number.isSafeInteger(event.bot.id) || !event.bot.username || !event.bot.is_bot) return;
     const id = String(event.bot.id);
     if (id === this.config.managerId) return;
@@ -300,7 +342,7 @@ export class TelegramService {
       ON CONFLICT (id) DO UPDATE SET owner_id = $2, username = $3, knowledge_base_id = $4, token_ciphertext = $5, enabled = $7
     `, [id, owner, event.bot.username, kb, encryptToken(token, this.config.encryptionKey), secret, enabled]);
     if (session?.state === 'create_bot') await this.session(db, event.user.id, 'menu');
-    await this.enqueue(db, this.config.managerId, event.user.id, enabled ? 'Your bot is ready to answer questions. Open the link below to try it.' : 'Bot connected. Choose a ready knowledge base and enable answers from My bots.', { remove_keyboard: true });
+    await this.enqueue(db, this.config.managerId, event.user.id, enabled ? t('Your bot is ready to answer questions. Open the link below to try it.') : t('Bot connected. Choose a ready knowledge base and enable answers from My bots.'), { remove_keyboard: true });
     await this.showBot(db, event.user.id, id);
   }
 }

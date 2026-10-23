@@ -40,6 +40,8 @@ before(async () => {
   await promisify(execFile)(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', 'up', '--no-verbose'], { env: { ...process.env, DATABASE_URL: url.toString() } });
   pool = new pg.Pool({ connectionString: url.toString() });
   db = await pool.connect();
+  await pool.query("INSERT INTO telegram_sessions (user_id, language) SELECT user_id, 'en' FROM generate_series(10, 23) user_id");
+  await pool.query("INSERT INTO telegram_sessions (user_id, language) VALUES (999, 'en')");
   service = new TelegramService(pool, config, api, questions);
   server = createApp({ pool, apiKey: 'key'.repeat(20), ownerId: 'developer', telegram: service }).listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -295,4 +297,61 @@ test('Telegram forwards friendly redirections and hides internal provider valida
     const text = (await pool.query("SELECT payload->>'text' AS text FROM telegram_outbox WHERE payload->>'chat_id' = '23' ORDER BY id DESC LIMIT 1")).rows[0].text;
     assert.match(text, /try.*again/i); assert.ok(!text.includes('provider')); assert.ok(!text.includes('validation'));
   } finally { service = original; }
+});
+
+async function lastReply(user) {
+  return (await pool.query("SELECT payload FROM telegram_outbox WHERE method = 'sendMessage' AND payload->>'chat_id' = $1 ORDER BY id DESC LIMIT 1", [String(user)])).rows[0].payload;
+}
+
+test('new users choose a language before management actions and invalid language callbacks do not advance', async () => {
+  await deliver(message(30, '/start'));
+  let reply = await lastReply(30);
+  assert.deepEqual(reply.reply_markup.inline_keyboard[0].map(button => button.callback_data), ['lang:en', 'lang:ru']);
+  await deliver(callback(30, 'new'));
+  assert.equal((await lastReply(30)).text, reply.text);
+  await deliver(callback(30, 'lang:de'));
+  assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 30')).rows.length, 0);
+  await deliver(callback(30, 'lang:ru'));
+  reply = await lastReply(30);
+  assert.equal(reply.text, 'Управляйте базами знаний и Telegram-ботами.');
+  assert.equal(reply.reply_markup.inline_keyboard[0][0].text, 'Создать базу знаний');
+  assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 30')).rows[0].language, 'ru');
+});
+
+test('Russian preference survives workflow changes and restart; notifications and validation are localized', async () => {
+  await deliver(callback(30, 'new'));
+  assert.equal((await lastReply(30)).text, 'Как назовём базу знаний?');
+  await deliver(message(30, ''));
+  assert.equal((await lastReply(30)).text, 'Отправьте название длиной от 1 до 80 символов.');
+  await deliver(message(30, 'Language')); // User content matching an English UI label stays unchanged.
+  service = new TelegramService(pool, config, api, questions);
+  await deliver(message(30, 'The comic store opens at 9 AM.'));
+  const kb = (await pool.query("SELECT id, name FROM knowledge_bases WHERE owner_id = 'telegram:30'")).rows[0];
+  assert.equal(kb.name, 'Language');
+  assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 30')).rows[0].language, 'ru');
+  await ready(kb.id); await notifyIngestion(service, db);
+  let reply = await lastReply(30);
+  assert.equal(reply.text, 'База «Language» готова к работе.');
+  assert.equal(reply.reply_markup.inline_keyboard[0][0].text, 'Открыть базу знаний');
+  await deliver(callback(30, `kb:${kb.id}`));
+  assert.match((await lastReply(30)).text, /Статус: готова/);
+  await deliver(callback(30, `replace:${kb.id}`));
+  await deliver(message(30, undefined, { document: { file_id: 'file', file_name: 'bad.exe' } }));
+  assert.equal((await lastReply(30)).text, 'Этот формат файла не поддерживается.');
+  await deliver(callback(30, `create:${kb.id}`));
+  reply = await lastReply(30);
+  assert.equal(reply.reply_markup.keyboard[0][0].text, 'Создать Telegram-бота');
+  assert.ok(reply.reply_markup.keyboard[0][0].request_managed_bot);
+});
+
+test('language can be changed from the menu or command, without affecting another user', async () => {
+  await deliver(message(30, '/language'));
+  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][1].text, 'Русский');
+  await deliver(callback(30, 'lang:en'));
+  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'Create knowledge base');
+  await deliver(callback(30, 'language'));
+  await deliver(callback(30, 'lang:ru'));
+  await deliver(message(11, '/start'));
+  assert.equal((await lastReply(11)).text, 'Manage your knowledge bases and Telegram bots.');
+  assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 11')).rows[0].language, 'en');
 });

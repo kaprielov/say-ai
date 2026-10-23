@@ -1,3 +1,4 @@
+import { translator } from './i18n.js';
 import { setTimeout } from 'node:timers/promises';
 import type { PoolClient } from 'pg';
 import { QueryError } from '../queries/errors.js';
@@ -22,7 +23,8 @@ export async function processUpdate(service: TelegramService, db: PoolClient) {
         const message = row.payload.callback_query?.message ?? row.payload.message;
         const sender = row.payload.callback_query?.from ?? row.payload.message?.from;
         if (message?.chat.type === 'private' && sender && sender.id === message.chat.id) {
-          await service.enqueue(db, row.bot_id, sender.id, error instanceof QueryError ? error.message : 'Unable to process this request. Please try again from /start.');
+          const t = row.bot_id === service.config.managerId ? await service.locale(db, sender.id) : translator();
+          await service.enqueue(db, row.bot_id, sender.id, t(error instanceof QueryError ? error.message : 'Unable to process this request. Please try again from /start.'));
         }
         await db.query('UPDATE telegram_updates SET done = true, payload = NULL, attempts = attempts + 1 WHERE id = $1', [row.id]);
         if (!(error instanceof QueryError)) console.error('Telegram update could not be processed.');
@@ -77,9 +79,10 @@ export async function notifyIngestion(service: TelegramService, db: PoolClient) 
       WHERE t.status IN ('ready', 'failed') LIMIT 20 FOR UPDATE OF n
     `)).rows;
     for (const row of rows) {
+      const t = await service.locale(db, row.chat_id);
       await service.enqueue(db, service.config.managerId, row.chat_id,
-        row.status === 'ready' ? `${row.name}: knowledge base is ready.` : `${row.name}: processing failed. Replace the content to try again.`,
-        { inline_keyboard: [[{ text: 'View knowledge base', callback_data: `kb:${row.knowledge_base_id}` }]] });
+        t(row.status === 'ready' ? '{name}: knowledge base is ready.' : '{name}: processing failed. Replace the content to try again.', { name: row.name }),
+        { inline_keyboard: [[{ text: t('View knowledge base'), callback_data: `kb:${row.knowledge_base_id}` }]] });
       await db.query('DELETE FROM telegram_notifications WHERE task_id = $1', [row.task_id]);
     }
     await db.query('COMMIT');
@@ -124,6 +127,7 @@ export async function startTelegramWorker(service: TelegramService, onFailure: (
     await service.api.call(service.config.token, 'setMyCommands', { commands: [
       { command: 'start', description: 'Open the main menu' }, { command: 'help', description: 'Show available actions' },
       { command: 'cancel', description: 'Cancel and return to the menu' },
+      { command: 'language', description: 'Change interface language' },
     ] });
   } catch (error) {
     db.removeListener('error', onError);

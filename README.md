@@ -270,12 +270,13 @@ The optional Telegram integration provides the user interface through a manager 
    ```
 
 5. Configure `OPENAI_API_KEY` for ingestion and answering, run `npm run db:migrate`, then start the application. Startup verifies the manager token and registers its commands and the webhooks of the manager and all stored child bots. Leaving the manager token empty disables Telegram integration.
-6. Open the manager bot in a current Telegram client and send `/start`.
+6. Open the manager bot in a current Telegram client, send `/start`, and choose **English** or **Русский**. The preference is stored per Telegram user. Existing users without a preference are also prompted on their next interaction.
 
 Preserve the encryption key across restarts and deployments. Existing managed bot tokens cannot be decrypted with another key. Webhook secrets and encrypted bot credentials are server-side only. A change to the manager webhook secret is applied on startup; existing child bots keep their own stored secrets. When the public URL changes, restarting the backend updates every stored bot webhook, including paused bots. Invalid child credentials pause that bot without blocking the others; other registration failures stop startup so it can be retried. The public development command stops both processes with Ctrl+C or when either process exits. Its temporary URL changes on each launch; a named Cloudflare Tunnel with a domain is an option for a stable hostname. Quick Tunnels are intended for development.
 
 ### User flow
 
+- **Language / Язык** in the main menu or `/language` opens the language selector again. Switching language returns to the main menu. Manager messages, buttons, status cards, validation errors, ingestion notifications, and chat command descriptions use the stored preference. User-supplied names and source content are preserved; model answers continue to follow the question's language.
 - **Create knowledge base** asks for a name, then accepts one supported file up to 1 MiB or a text message. Native Telegram messages have their own text length limit. The shared upload decoder also supports PDF, DOCX, and DOC; scanned documents require OCR and are not supported.
 - **My knowledge bases** lists the owner's bases. Each base provides status, renaming, complete content replacement, test questions, bot creation, and deletion with confirmation. Ingestion completion or failure is reported through a persistent notification. Deletion requires ingestion to have finished and pauses and disconnects associated bots.
 - **Create Telegram bot** opens Telegram's native managed-bot creation dialog. The owner confirms its name and username. Telegram's `managed_bot` update provides the owner and bot identity; the manager retrieves the token and sets the child webhook automatically. The user does not copy a child token.

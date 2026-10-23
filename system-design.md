@@ -20,7 +20,7 @@ Content replacement is implemented at `PUT /knowledge-bases/{id}/content`. It ch
 
 ### Telegram interface and ownership
 
-The service operates one manager bot and its users' managed bots. A user creates a named knowledge base, sends a supported document or text, receives an ingestion notification, tests answers, and creates a Telegram bot through a native Telegram dialog. The manager requires Bot Management Mode in BotFather. User confirmation creates the bot account; the manager receives `managed_bot`, retrieves its token, verifies its identity, and registers a webhook. End users never copy child bot tokens.
+The service operates one manager bot and its users' managed bots. A user creates a named knowledge base, sends a supported document or text, receives an ingestion notification, tests answers, and creates a Telegram bot through a native Telegram dialog. The first manager interaction asks the user to choose English or Russian. The nullable `telegram_sessions.language` column records this preference; existing users choose on their next interaction. The menu language button and `/language` command allow later changes and return to the main menu. UI messages, buttons, status cards, errors, asynchronous notifications, and per-chat command descriptions are localized. User content stays unchanged, and model answers follow the question language. The manager requires Bot Management Mode in BotFather. User confirmation creates the bot account; the manager receives `managed_bot`, retrieves its token, verifies its identity, and registers a webhook. End users never copy child bot tokens.
 
 The HTTP developer key maps to `DEVELOPER_OWNER_ID`. Telegram management derives the owner as `telegram:<numeric-user-id>` from authenticated Telegram updates. Every base and bot management action checks this owner. Customer questions resolve the base and its owner from the registered child bot; customer IDs cannot choose or override ownership. A composite database foreign key also prevents binding a bot to another owner's base. This release handles private chats only.
 
@@ -52,7 +52,7 @@ Telegram adds these durable tables to the original knowledge-base/version/chunk/
 
 | Table | Purpose |
 | --- | --- |
-| `telegram_sessions` | Current management step, selected base, and draft name for each user. |
+| `telegram_sessions` | Current management step, selected base, draft name, and interface language for each user. |
 | `telegram_bots` | Bot identity, owner, selected base, enabled state, AES-256-GCM encrypted token, and webhook secret. |
 | `telegram_updates` | Incoming update payload, retry state, and unique `(bot_id, update_id)` delivery identity. Completed payloads are cleared. |
 | `telegram_outbox` | Committed outgoing messages and Telegram API calls with delivery retries. |
