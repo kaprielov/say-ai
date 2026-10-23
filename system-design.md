@@ -2,7 +2,7 @@
 
 Status: MVP requirements, API draft, data flows, recovery policy, query limits, proposed architecture, and initial evaluation approach recorded. Technology choices and some implementation details remain open.
 
-Updated: 22 October 2026.
+Updated: 23 October 2026.
 
 ### Current implementation
 
@@ -14,7 +14,9 @@ Transient ingestion failures allow three persisted attempts total, separated by 
 
 Question answering is implemented at `POST /knowledge-bases/{id}/queries`, using the captured ready version's embedding configuration and exact cosine retrieval. It ranks eight chunks without a similarity cutoff and budgets serialized context to 3000 `cl100k_base` tokens. The initial `0.6` filter was removed after it rejected useful opening-hours evidence scoring about `0.37`; the model now assesses answerability from the retrieved context. The selected answering model is GPT-6 Luna through the Responses API, with reasoning disabled, structured answers/refusals, source chunk IDs, response storage disabled, and an output cap of 768 tokens. Unsupported questions return an explicit insufficient-context outcome; model citations are checked against supplied chunks.
 
-An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A ten-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. One synthetic live answer/refusal smoke test has passed; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated. The content-replacement endpoint is not implemented yet.
+An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A ten-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. One synthetic live answer/refusal smoke test has passed; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated.
+
+Content replacement is implemented at `PUT /knowledge-bases/{id}/content`. It checks ownership, locks the knowledge-base row, and durably saves the complete replacement text and a pending task before returning `202`. The existing partial unique index prevents overlapping pending/processing submissions, which return `409` with `ingestion_in_progress`. Submission timestamps are recorded after acquiring the row lock. Replacement leaves the active version unchanged until the ingestion activation transaction succeeds; existing queries keep their captured version, and terminal failure preserves the previous ready version. A new submission is allowed after terminal failure. Validation, concurrent acceptance, recovery, rollback, and version availability are covered by API/database tests.
 
 ## 1. Context and scope
 

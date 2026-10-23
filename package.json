@@ -15,7 +15,8 @@
     "test:db": "node --env-file-if-exists=.env --test tests/database.test.mjs",
     "test:api": "node --env-file-if-exists=.env --import tsx --test tests/api.test.mjs",
     "test:ingestion": "node --env-file-if-exists=.env --import tsx --test tests/ingestion.test.mjs",
-    "test:queries": "node --env-file-if-exists=.env --import tsx --test tests/queries.test.mjs"
+    "test:queries": "node --env-file-if-exists=.env --import tsx --test tests/queries.test.mjs",
+    "test:replacement": "node --env-file-if-exists=.env --import tsx --test tests/replacement.test.mjs"
   },
   "engines": {
     "node": ">=22.13.0"

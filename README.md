@@ -44,6 +44,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run test:api` | Test authentication, validation, persistence, owner isolation, and atomic creation in a temporary database. Requires database creation permission, available with the local Compose user. |
 | `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
 | `npm run test:queries` | Test question answering, ownership, retrieval, grounding contracts, concurrency, deadlines, and cancellation in a temporary database. No paid provider calls by default. |
+| `npm run test:replacement` | Test content replacement through the API, concurrent submissions, version switching, failure recovery, and old-version availability. Uses a temporary database and controlled providers. |
 
 Compose stores database files in a named volume. Normal stops and restarts preserve it. Run migrations explicitly; application startup does not modify the schema.
 
@@ -83,6 +84,30 @@ Errors use a common shape:
 ```json
 {"error":{"code":"unauthorized","message":"A valid bearer API key is required."}}
 ```
+
+### Replace content
+
+```http
+PUT /knowledge-bases/<uuid>/content
+Authorization: Bearer <your-key>
+Content-Type: application/json
+
+{"text":"Our shop now closes at 9 PM."}
+```
+
+Replaces the complete content under the existing knowledge-base ID. The same ownership checks and text validation apply as on creation: a non-empty string without null characters, in a JSON body up to 1 MiB. Invalid IDs return `400`; missing or inaccessible knowledge bases return `404`.
+
+The server commits the new source text and pending ingestion task before returning `202 Accepted`, with a `Location` header pointing to the status endpoint:
+
+```json
+{"id":"<uuid>","status":"pending","queryable":true}
+```
+
+`queryable` is false when no ready version exists yet. If any ingestion task for this knowledge base is pending or processing, the request returns `409` with `ingestion_in_progress`. This includes initial ingestion and retries scheduled for later. A database constraint and a transaction with an owner-scoped knowledge-base row lock prevent simultaneous replacements from both being accepted.
+
+Poll the metadata endpoint to observe progress. Questions continue to use the previous ready version during processing and after terminal failure. Once ingestion succeeds, subsequent questions use only the new version. Questions already in flight retain their captured version; successful old versions are retained. When no ready version exists, questions continue to return `409` until ingestion succeeds.
+
+After terminal ingestion failure, a new replacement can be submitted with a fresh three-attempt budget. Retrying the same PUT while its previous submission is pending or processing returns `409`; this endpoint does not implement an idempotency key. With ingestion paused, accepted submissions remain pending until the worker is enabled.
 
 ### Ask a question
 
@@ -184,4 +209,4 @@ Foreign keys also prevent attaching another knowledge base's task or active vers
 
 Migrations use [node-pg-migrate](https://salsita.github.io/node-pg-migrate/) and run transactionally. The initial rollback retains the `vector` extension but removes the four application tables.
 
-The current application provides the health endpoint, database foundation, single-developer authentication, knowledge-base creation/status, background ingestion, and question answering. The content-replacement endpoint and full representative evaluation remain to be implemented. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).
+The current application provides the health endpoint, database foundation, single-developer authentication, knowledge-base creation/status/replacement, background ingestion, and question answering. Full representative quality, latency, and freshness evaluation remains to be completed. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).

@@ -74,6 +74,51 @@ export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
     response.location(`/knowledge-bases/${id}`).status(201).json({ id, status: 'pending', queryable: false });
   });
 
+  app.put('/knowledge-bases/:id/content', express.json({ limit: '1mb' }), async (request, response) => {
+    const id = request.params.id;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new QueryError(400, 'invalid_id', 'Knowledge base ID must be a valid UUID.');
+    }
+    if (!request.is('application/json')) {
+      throw new QueryError(415, 'unsupported_media_type', 'Use Content-Type: application/json.');
+    }
+    const text = request.body?.text;
+    if (typeof text !== 'string' || !text.trim() || text.includes('\0')) {
+      throw new QueryError(400, 'invalid_text', 'text must be a non-empty string without null characters.');
+    }
+
+    const client = await pool.connect();
+    let queryable: boolean;
+    try {
+      await client.query('BEGIN');
+      const knowledgeBase = await client.query<{ active_version_id: string | null }>(`
+        SELECT active_version_id FROM knowledge_bases
+        WHERE id = $1 AND owner_id = $2 FOR UPDATE
+      `, [id, response.locals.ownerId]);
+      const current = knowledgeBase.rows[0];
+      if (!current) throw new QueryError(404, 'not_found', 'Knowledge base not found.');
+      // Timestamp acceptance after the row lock, rather than at transaction start.
+      const task = await client.query(`
+        INSERT INTO ingestion_tasks (knowledge_base_id, source_text, created_at, updated_at)
+        VALUES ($1, $2, clock_timestamp(), clock_timestamp())
+        ON CONFLICT (knowledge_base_id) WHERE status IN ('pending', 'processing')
+        DO NOTHING RETURNING id
+      `, [id, text]);
+      if (!task.rows[0]) {
+        throw new QueryError(409, 'ingestion_in_progress', 'Content ingestion is already pending or processing.');
+      }
+      await client.query('UPDATE knowledge_bases SET updated_at = clock_timestamp() WHERE id = $1', [id]);
+      queryable = current.active_version_id !== null;
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    response.location(`/knowledge-bases/${id}`).status(202).json({ id, status: 'pending', queryable });
+  });
+
   app.get('/knowledge-bases/:id', async (request, response) => {
     const id = request.params.id;
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
