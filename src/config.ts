@@ -48,3 +48,20 @@ export function readQueryConfig() {
   if (!apiKey) return undefined;
   return { apiKey };
 }
+
+export function readTelegramConfig() {
+  const token = process.env.TELEGRAM_MANAGER_TOKEN?.trim();
+  if (!token) return undefined;
+  if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) throw new Error('TELEGRAM_MANAGER_TOKEN is invalid.');
+  const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET ?? '';
+  if (!/^[A-Za-z0-9_-]{32,256}$/.test(webhookSecret)) throw new Error('TELEGRAM_WEBHOOK_SECRET must contain 32-256 letters, numbers, underscores, or hyphens.');
+  const encryptionKey = process.env.TELEGRAM_TOKEN_ENCRYPTION_KEY ?? '';
+  if (!/^[a-f0-9]{64}$/i.test(encryptionKey)) throw new Error('TELEGRAM_TOKEN_ENCRYPTION_KEY must be a 32-byte hexadecimal key.');
+  const publicUrl = new URL(process.env.TELEGRAM_PUBLIC_URL ?? '');
+  if (publicUrl.protocol !== 'https:' || publicUrl.username || publicUrl.password || publicUrl.search || publicUrl.hash) {
+    throw new Error('TELEGRAM_PUBLIC_URL must be a public HTTPS base URL without credentials, query, or fragment.');
+  }
+  const dailyQueries = Number(process.env.TELEGRAM_DAILY_QUERY_LIMIT ?? 100);
+  if (!Number.isSafeInteger(dailyQueries) || dailyQueries < 1) throw new Error('TELEGRAM_DAILY_QUERY_LIMIT must be a positive integer.');
+  return { token, managerId: token.split(':')[0]!, webhookSecret, publicUrl: publicUrl.toString().replace(/\/$/, ''), encryptionKey: Buffer.from(encryptionKey, 'hex'), dailyQueries };
+}

@@ -4,22 +4,27 @@ import type { Pool } from 'pg';
 import type { QuestionAnswering } from './queries/service.js';
 import { QueryError } from './queries/errors.js';
 import { parseSource, sourceText } from './ingestion/source.js';
+import { createKnowledgeBase, replaceKnowledgeBase, transaction } from './knowledge-bases/service.js';
+import type { TelegramService } from './telegram/service.js';
+import { telegramRouter } from './telegram/router.js';
 
 type AppOptions = {
   pool: Pool;
   apiKey: string;
   ownerId: string;
   questions?: QuestionAnswering;
+  telegram?: TelegramService;
 };
 
 function keyDigest(key: string) {
   return createHash('sha256').update(key).digest();
 }
 
-export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
+export function createApp({ pool, apiKey, ownerId, questions, telegram }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
   const expectedDigest = keyDigest(apiKey);
+  if (telegram) app.use('/telegram', telegramRouter(telegram));
 
   app.get('/health', async (_request, response) => {
     try {
@@ -44,26 +49,7 @@ export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
   app.post('/knowledge-bases', parseSource, async (request, response) => {
     const text = sourceText(request.body);
 
-    const client = await pool.connect();
-    let id: string;
-    try {
-      await client.query('BEGIN');
-      const result = await client.query<{ id: string }>(
-        'INSERT INTO knowledge_bases (owner_id) VALUES ($1) RETURNING id',
-        [response.locals.ownerId],
-      );
-      id = result.rows[0]!.id;
-      await client.query(
-        'INSERT INTO ingestion_tasks (knowledge_base_id, source_text) VALUES ($1, $2)',
-        [id, text],
-      );
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    const { id } = await transaction(pool, db => createKnowledgeBase(db, response.locals.ownerId, text));
     response.location(`/knowledge-bases/${id}`).status(201).json({ id, status: 'pending', queryable: false });
   });
 
@@ -74,35 +60,7 @@ export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
     }
     const text = sourceText(request.body);
 
-    const client = await pool.connect();
-    let queryable: boolean;
-    try {
-      await client.query('BEGIN');
-      const knowledgeBase = await client.query<{ active_version_id: string | null }>(`
-        SELECT active_version_id FROM knowledge_bases
-        WHERE id = $1 AND owner_id = $2 FOR UPDATE
-      `, [id, response.locals.ownerId]);
-      const current = knowledgeBase.rows[0];
-      if (!current) throw new QueryError(404, 'not_found', 'Knowledge base not found.');
-      // Timestamp acceptance after the row lock, rather than at transaction start.
-      const task = await client.query(`
-        INSERT INTO ingestion_tasks (knowledge_base_id, source_text, created_at, updated_at)
-        VALUES ($1, $2, clock_timestamp(), clock_timestamp())
-        ON CONFLICT (knowledge_base_id) WHERE status IN ('pending', 'processing')
-        DO NOTHING RETURNING id
-      `, [id, text]);
-      if (!task.rows[0]) {
-        throw new QueryError(409, 'ingestion_in_progress', 'Content ingestion is already pending or processing.');
-      }
-      await client.query('UPDATE knowledge_bases SET updated_at = clock_timestamp() WHERE id = $1', [id]);
-      queryable = current.active_version_id !== null;
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    const { queryable } = await transaction(pool, db => replaceKnowledgeBase(db, response.locals.ownerId, id, text));
     response.location(`/knowledge-bases/${id}`).status(202).json({ id, status: 'pending', queryable });
   });
 

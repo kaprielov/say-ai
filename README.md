@@ -247,3 +247,47 @@ Foreign keys also prevent attaching another knowledge base's task or active vers
 Migrations use [node-pg-migrate](https://salsita.github.io/node-pg-migrate/) and run transactionally. The initial rollback retains the `vector` extension but removes the four application tables.
 
 The current application provides the health endpoint, database foundation, single-developer authentication, knowledge-base creation/status/replacement, background ingestion, and question answering. Full representative quality, latency, and freshness evaluation remains to be completed. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).
+
+## Telegram interface
+
+The optional Telegram integration provides the user interface through a manager bot and native Telegram buttons; no frontend or Mini App is required. Each private-chat user owns knowledge bases under the stable `telegram:<numeric-user-id>` owner ID. The developer HTTP key retains its configured owner and does not grant Telegram users HTTP access.
+
+### Setup
+
+1. Create a manager bot in [BotFather](https://t.me/BotFather). In BotFather's Mini App, enable **Bot Management Mode** for that bot.
+2. Set `TELEGRAM_MANAGER_TOKEN` in `.env`. Do not send the token through a chat or commit it.
+3. For local public access, install `cloudflared` and run `npm run dev:public` after configuring the credentials below. This starts a Cloudflare Quick Tunnel and the backend together, injecting `TELEGRAM_PUBLIC_URL` automatically without editing `.env`. Stop any existing backend on the same port first. For a separately managed tunnel or deployment, set `TELEGRAM_PUBLIC_URL` to its public HTTPS base URL. Telegram must be able to reach `/telegram/webhook/<bot-id>`.
+4. Set `TELEGRAM_WEBHOOK_SECRET` to a random secret containing at least 32 URL-safe characters. Set `TELEGRAM_TOKEN_ENCRYPTION_KEY` to a random 32-byte key encoded as 64 hexadecimal characters. Generate them separately:
+
+   ```sh
+   node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+   node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+   ```
+
+5. Configure `OPENAI_API_KEY` for ingestion and answering, run `npm run db:migrate`, then start the application. Startup verifies the manager token and registers its commands and the webhooks of the manager and all stored child bots. Leaving the manager token empty disables Telegram integration.
+6. Open the manager bot in a current Telegram client and send `/start`.
+
+Preserve the encryption key across restarts and deployments. Existing managed bot tokens cannot be decrypted with another key. Webhook secrets and encrypted bot credentials are server-side only. A change to the manager webhook secret is applied on startup; existing child bots keep their own stored secrets. When the public URL changes, restarting the backend updates every stored bot webhook, including paused bots. Invalid child credentials pause that bot without blocking the others; other registration failures stop startup so it can be retried. The public development command stops both processes with Ctrl+C or when either process exits. Its temporary URL changes on each launch; a named Cloudflare Tunnel with a domain is an option for a stable hostname. Quick Tunnels are intended for development.
+
+### User flow
+
+- **Create knowledge base** asks for a name, then accepts one supported file up to 1 MiB or a text message. Native Telegram messages have their own text length limit. The shared upload decoder also supports PDF, DOCX, and DOC; scanned documents require OCR and are not supported.
+- **My knowledge bases** lists the owner's bases. Each base provides status, renaming, complete content replacement, test questions, bot creation, and deletion with confirmation. Ingestion completion or failure is reported through a persistent notification. Deletion requires ingestion to have finished and pauses and disconnects associated bots.
+- **Create Telegram bot** opens Telegram's native managed-bot creation dialog. The owner confirms its name and username. Telegram's `managed_bot` update provides the owner and bot identity; the manager retrieves the token and sets the child webhook automatically. The user does not copy a child token.
+- New bots created with a selected ready knowledge base start answering immediately and are accessible to other users. Bots without a selected ready base remain paused and restricted to their owner; select a ready base in **My bots** and choose **Publish / enable answers** to activate them. Switching the selected base pauses answers until the owner publishes again. **Pause answers** stops answering in this backend; it does not delete the Telegram account or change its username.
+- Child bots answer text questions in private chats using their registered owner's selected base. A customer cannot choose a different base or invoke management actions. `/start` introduces the bot. Testing in the manager uses the same answering service.
+- `/cancel`, `/help`, and `/start` return to the manager's main menu. Base and bot lists are paginated. Creating multiple bots from one owner uses that owner's shared allowance. If a creation completes after its setup was canceled, the bot remains unbound; select a base through **My bots**.
+
+The implementation follows Telegram's [Managed Bots flow](https://core.telegram.org/bots/features#managed-bots), [`request_managed_bot` button](https://core.telegram.org/bots/api#keyboardbutton), and [managed-bot token methods](https://core.telegram.org/bots/api#getmanagedbottoken). Live bot creation still needs verification with a real manager token and supported Telegram clients.
+
+### Processing and limits
+
+Authenticated webhooks persist updates before acknowledging them. `(bot_id, update_id)` deduplication prevents a delivered update from being processed twice after a successful commit. Source changes, session state, update completion, and outgoing messages commit together. A single Telegram worker processes updates in arrival order, with up to three attempts for transient failures; a delayed retry holds later updates until it can run. It holds a PostgreSQL advisory lock, separate from the ingestion worker's lock. Use one application instance with workers enabled.
+
+The persistent outbox retries message delivery up to five times and honors Telegram `retry_after`. A blocked customer does not disable the whole bot. Revoked child tokens pause answering when delivery reports unauthorized; managed-bot updates refresh tokens, and owner changes detach the previous base and pause the bot. Terminal delivery failures are logged without tokens, source text, or provider details. Raw update payloads are cleared after completion; deduplication identifiers remain.
+
+External API calls and PostgreSQL cannot commit atomically. An interruption after Telegram accepts an outgoing message but before its deletion from the outbox can duplicate that message. A crash after an AI request but before the update transaction commits can repeat the provider request and its charges. The current worker is intentionally sequential, so a slow question delays other Telegram requests; scale this before serving sustained traffic. Telegram's update retention also limits recovery from prolonged downtime.
+
+`TELEGRAM_DAILY_QUERY_LIMIT` defaults to 100 admitted questions per owner per database calendar day, shared across customer bots and manager tests. Provider failures consume the allowance. This is an application allowance, not an exact currency budget. Telegram users can hold at most 20 knowledge bases. Ingestion uses the existing durable worker and provider limits; updates continue serving the previous ready version. Conversation history is not supplied to the model.
+
+Run `npm run test:telegram` for isolated-database integration tests with controlled Telegram and answer transports. No real Telegram or paid OpenAI requests are made by these tests.

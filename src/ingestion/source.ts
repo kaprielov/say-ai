@@ -48,36 +48,17 @@ export const parseSource: RequestHandler = (request, response, next) => {
       next(new QueryError(413, 'payload_too_large', 'File must not exceed 1 MiB.'));
       return;
     }
-    let text: string;
-    const extension = extname(request.file.originalname).toLowerCase();
-    if (documentExtensions.has(extension)) {
-      const controller = new AbortController();
-      const onClose = () => { if (!response.writableEnded) controller.abort(); };
-      response.once('close', onClose);
-      try {
-        text = await extractDocument(request.file.buffer, extension, controller.signal);
-      } catch (error) {
-        next(error);
-        return;
-      } finally {
-        response.removeListener('close', onClose);
-      }
-      request.body = { text };
-      next();
-      return;
-    }
+    const controller = new AbortController();
+    const onClose = () => { if (!response.writableEnded) controller.abort(); };
+    response.once('close', onClose);
     try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(request.file.buffer);
-    } catch {
-      next(new QueryError(400, 'invalid_file_encoding', 'File must contain valid UTF-8 text.'));
-      return;
+      request.body = { text: await decodeSource(request.file.buffer, request.file.originalname, controller.signal) };
+      next();
+    } catch (error) {
+      next(error);
+    } finally {
+      response.removeListener('close', onClose);
     }
-    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) {
-      next(new QueryError(400, 'invalid_text', 'File must contain text without binary control characters.'));
-      return;
-    }
-    request.body = { text };
-    next();
   });
 };
 
@@ -87,4 +68,22 @@ export function sourceText(body: unknown): string {
     throw new QueryError(400, 'invalid_text', 'text must be a non-empty string without null characters.');
   }
   return text;
+}
+
+// Shared by multipart uploads and Telegram document messages.
+export async function decodeSource(buffer: Buffer, filename: string, signal = new AbortController().signal) {
+  if (buffer.length > maxFileBytes) throw new QueryError(413, 'payload_too_large', 'File must not exceed 1 MiB.');
+  const extension = extname(filename).toLowerCase();
+  if (documentExtensions.has(extension)) return sourceText({ text: await extractDocument(buffer, extension, signal) });
+  if (!extensions.has(extension)) throw new QueryError(415, 'unsupported_file_type', 'Unsupported file format.');
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch {
+    throw new QueryError(400, 'invalid_file_encoding', 'File must contain valid UTF-8 text.');
+  }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) {
+    throw new QueryError(400, 'invalid_text', 'File must contain text without binary control characters.');
+  }
+  return sourceText({ text });
 }

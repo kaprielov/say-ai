@@ -1,9 +1,12 @@
 import { createApp } from './app.js';
-import { config, readAuthConfig, readIngestionConfig, readQueryConfig } from './config.js';
+import { config, readAuthConfig, readIngestionConfig, readQueryConfig, readTelegramConfig } from './config.js';
 import { pool } from './db.js';
 import { OpenAIEmbedder } from './ingestion/embeddings.js';
 import { startIngestionWorker } from './ingestion/worker.js';
 import { QuestionAnswering } from './queries/service.js';
+import { TelegramService } from './telegram/service.js';
+import { TelegramClient } from './telegram/client.js';
+import { startTelegramWorker } from './telegram/worker.js';
 import { OpenAIAnswerer } from './queries/answerer.js';
 
 const queryConfig = readQueryConfig();
@@ -12,9 +15,12 @@ const questions = queryConfig ? new QuestionAnswering({
   embedder: (model, dimensions) => new OpenAIEmbedder(queryConfig.apiKey, model, dimensions),
   answerer: new OpenAIAnswerer(queryConfig.apiKey),
 }) : undefined;
-const app = createApp({ pool, ...readAuthConfig(), questions });
+const telegramConfig = readTelegramConfig();
+const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions) : undefined;
+const app = createApp({ pool, ...readAuthConfig(), questions, telegram });
 const ingestion = readIngestionConfig();
 let worker: Awaited<ReturnType<typeof startIngestionWorker>> | undefined;
+let telegramWorker: Awaited<ReturnType<typeof startTelegramWorker>> | undefined;
 let server: ReturnType<typeof app.listen> | undefined;
 let shuttingDown = false;
 
@@ -25,6 +31,7 @@ async function shutdown(failed = false) {
   const closed = server ? new Promise<void>((resolve, reject) => {
     server!.close(error => error ? reject(error) : resolve());
   }) : Promise.resolve();
+  await telegramWorker?.stop();
   await worker?.stop();
   await closed;
   await pool.end();
@@ -49,6 +56,18 @@ if (!shuttingDown) {
   server = app.listen(config.port, () => {
     console.log(`Server listening on http://localhost:${config.port}`);
   });
+}
+
+if (telegram && !shuttingDown) {
+  try {
+    telegramWorker = await startTelegramWorker(telegram, () => {
+      console.error('Telegram worker stopped unexpectedly. Restart the application to recover queued work.');
+      void shutdown(true);
+    });
+  } catch {
+    console.error('Unable to start Telegram. Check configuration, migrations, and Telegram connectivity.');
+    await shutdown(true);
+  }
 }
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
