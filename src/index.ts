@@ -1,10 +1,18 @@
 import { createApp } from './app.js';
-import { config, readAuthConfig, readIngestionConfig } from './config.js';
+import { config, readAuthConfig, readIngestionConfig, readQueryConfig } from './config.js';
 import { pool } from './db.js';
 import { OpenAIEmbedder } from './ingestion/embeddings.js';
 import { startIngestionWorker } from './ingestion/worker.js';
+import { QuestionAnswering } from './queries/service.js';
+import { OpenAIAnswerer } from './queries/answerer.js';
 
-const app = createApp({ pool, ...readAuthConfig() });
+const queryConfig = readQueryConfig();
+const questions = queryConfig ? new QuestionAnswering({
+  pool,
+  embedder: (model, dimensions) => new OpenAIEmbedder(queryConfig.apiKey, model, dimensions),
+  answerer: new OpenAIAnswerer(queryConfig.apiKey),
+}) : undefined;
+const app = createApp({ pool, ...readAuthConfig(), questions });
 const ingestion = readIngestionConfig();
 let worker: Awaited<ReturnType<typeof startIngestionWorker>> | undefined;
 let server: ReturnType<typeof app.listen> | undefined;

@@ -42,3 +42,9 @@ export function readIngestionConfig() {
   }
   return { apiKey, model, dimensions };
 }
+
+export function readQueryConfig() {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return undefined;
+  return { apiKey };
+}

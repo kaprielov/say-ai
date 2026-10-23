@@ -43,6 +43,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run test:db` | Verify schema constraints and vector retrieval against the migrated database. Fixtures are rolled back. |
 | `npm run test:api` | Test authentication, validation, persistence, owner isolation, and atomic creation in a temporary database. Requires database creation permission, available with the local Compose user. |
 | `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
+| `npm run test:queries` | Test question answering, ownership, retrieval, grounding contracts, concurrency, deadlines, and cancellation in a temporary database. No paid provider calls by default. |
 
 Compose stores database files in a named volume. Normal stops and restarts preserve it. Run migrations explicitly; application startup does not modify the schema.
 
@@ -83,6 +84,66 @@ Errors use a common shape:
 {"error":{"code":"unauthorized","message":"A valid bearer API key is required."}}
 ```
 
+### Ask a question
+
+```http
+POST /knowledge-bases/<uuid>/queries
+Authorization: Bearer <your-key>
+Content-Type: application/json
+
+{"question":"How long are audit logs retained?"}
+```
+
+With `OPENAI_API_KEY` configured and a ready content version, the API embeds the question using that version's stored model and dimensions, retrieves its closest chunks, and asks **GPT-6 Luna** for a grounded answer. It uses the [Responses API with structured output](https://developers.openai.com/api/docs/guides/structured-outputs), `reasoning.effort: "none"`, `store: false`, and at most 768 output tokens. The [GPT-6 Luna model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna) describes the selected model's supported settings.
+
+Successful answer, with exact supporting source chunks:
+
+```json
+{
+  "outcome": "answered",
+  "answer": "Audit logs are retained for 37 days.",
+  "sources": [{"chunk_id":"<uuid>","text":"Velora retains audit logs for 37 days."}]
+}
+```
+
+When the available context cannot support an answer, the API returns `200` with:
+
+```json
+{"outcome":"insufficient_context","answer":null,"sources":[]}
+```
+
+The question must be non-empty, contain no null characters, and fit within 4096 JavaScript string characters and 1024 `cl100k_base` tokens. The JSON body limit is 1 MiB. The server captures one ready version for each request; later activation of another version does not change that request's retrieval. Searches are scoped to both the selected version and its knowledge base.
+
+Retrieval ranks the closest eight chunks by cosine similarity without a similarity cutoff. It selects context within a 3000-token budget measured over the serialized chunks with `cl100k_base`. This is a budgeting convention, not the answering model's exact token count. If no context is available, the API declines without a generation call. Otherwise, the model assesses whether the passages support an answer and can decline. Similarity determines ranking, not whether a chunk is allowed into the prompt. `RETRIEVAL_MIN_SIMILARITY` is no longer used.
+
+Prompts instruct the model to use only supplied evidence and treat questions and source text as untrusted data. Answered responses must cite supplied chunk IDs; missing or invented citations are rejected. Semantic grounding still requires manual quality evaluation; structured output and valid citations alone do not prove every claim is supported.
+
+At most three queries run concurrently across all knowledge bases in one application process. Additional queries receive `429` immediately, without waiting. A single ten-second deadline covers admitted query processing, including token validation, ownership lookup, embedding, retrieval, and generation. Timeout returns `504`, attempts cancellation, and releases the query slot. Client disconnection also attempts cancellation. No provider requests are automatically retried.
+
+Operations still running after cancellation remain counted until they settle. A separate cap of six outstanding downstream operations prevents repeated timed-out requests from accumulating unlimited work; it can also cause `429` while fewer than three queries are active. Native provider transports have finite timeouts, and the configured production database pool bounds connection waits and SQL execution. Cancellation cannot guarantee that provider-side execution or charges stop.
+
+| HTTP status | Meaning |
+| --- | --- |
+| `400` | Invalid ID, question, or JSON. |
+| `401` | Missing or invalid developer API key. |
+| `404` | Knowledge base is missing or belongs to another owner. |
+| `409` | Knowledge base has no ready version. |
+| `413` / `415` | Oversized body or unsupported content type/encoding. |
+| `429` | Query capacity is full. |
+| `502` | Downstream processing failed or the answering model returned an incomplete, refused, or invalid response. Provider details are not exposed. |
+| `503` | OpenAI credentials are absent or the stored embedding configuration is unsupported. Ingestion can be paused independently of querying. |
+| `504` | The query exceeded its ten-second deadline. |
+
+An insufficient-evidence outcome is a successful `200` refusal, separate from a provider-level safety refusal or processing failure. The application does not persist questions or answers. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
+
+To run the optional paid live check using a synthetic knowledge base in a temporary database:
+
+```sh
+RUN_LIVE_QUERY_TEST=true node --env-file=.env --import tsx --test --test-name-pattern='live GPT-6 Luna' tests/queries.test.mjs
+```
+
+This smoke test exercises one supported answer and one insufficient-context outcome using the normal retrieval behavior. It is not the full representative quality or concurrent-load evaluation from the implementation plan.
+
 ## Background ingestion
 
 Set `OPENAI_API_KEY` in `.env` or the shell to enable the worker, then start the application with `npm run dev` or `npm start`. This is the provider credential; it is separate from `DEVELOPER_API_KEY`, which authenticates callers of this API. Leave `OPENAI_API_KEY` empty to run the API without ingestion. `INGESTION_ENABLED=false` explicitly pauses the worker; `INGESTION_ENABLED=true` requires a provider key.
@@ -100,7 +161,7 @@ Each provider request has a 30-second timeout, and each ingestion attempt has a 
 
 Partial failed versions are removed. Shutdown attempts to cancel the current provider call; its unfinished task remains durable. On restart, interrupted attempts count toward the limit, incomplete versions are removed, and eligible work restarts from the beginning. A third interrupted attempt becomes failed. Previous successful versions remain available and are never removed by this cleanup. Cancellation may not stop provider-side execution or charges.
 
-With ingestion enabled, poll `GET /knowledge-bases/<uuid>` until `status` becomes `ready` or `failed`. A ready knowledge base reports `queryable: true`; question answering will be implemented in the next step. Query availability here means prepared content exists, rather than that a query endpoint has already been implemented.
+With ingestion enabled, poll `GET /knowledge-bases/<uuid>` until `status` becomes `ready` or `failed`. A ready knowledge base reports `queryable: true` and can be queried when the OpenAI credential is configured.
 
 To run the optional live test, which makes a paid OpenAI embeddings request using a short synthetic source in a temporary database:
 
@@ -123,4 +184,4 @@ Foreign keys also prevent attaching another knowledge base's task or active vers
 
 Migrations use [node-pg-migrate](https://salsita.github.io/node-pg-migrate/) and run transactionally. The initial rollback retains the `vector` extension but removes the four application tables.
 
-The current application provides the health endpoint, database foundation, single-developer authentication, knowledge-base creation/status, and background ingestion. Querying and the content-replacement endpoint are the next implementation steps. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).
+The current application provides the health endpoint, database foundation, single-developer authentication, knowledge-base creation/status, background ingestion, and question answering. The content-replacement endpoint and full representative evaluation remain to be implemented. See [the implementation plan](implementation-plan.md) and [system design](system-design.md).

@@ -1,18 +1,21 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import express, { type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
+import type { QuestionAnswering } from './queries/service.js';
+import { QueryError } from './queries/errors.js';
 
 type AppOptions = {
   pool: Pool;
   apiKey: string;
   ownerId: string;
+  questions?: QuestionAnswering;
 };
 
 function keyDigest(key: string) {
   return createHash('sha256').update(key).digest();
 }
 
-export function createApp({ pool, apiKey, ownerId }: AppOptions) {
+export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
   const expectedDigest = keyDigest(apiKey);
@@ -93,12 +96,43 @@ export function createApp({ pool, apiKey, ownerId }: AppOptions) {
     response.json(result.rows[0]);
   });
 
+  app.post('/knowledge-bases/:id/queries', express.json({ limit: '1mb' }), async (request, response) => {
+    const id = request.params.id;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new QueryError(400, 'invalid_id', 'Knowledge base ID must be a valid UUID.');
+    }
+    if (!request.is('application/json')) throw new QueryError(415, 'unsupported_media_type', 'Use Content-Type: application/json.');
+    const question = request.body?.question;
+    if (typeof question !== 'string' || !question.trim() || question.includes('\0')) {
+      throw new QueryError(400, 'invalid_question', 'question must be a non-empty string without null characters.');
+    }
+    if (question.length > 4096) {
+      throw new QueryError(400, 'question_too_long', 'question must not exceed 4096 characters or 1024 tokens.');
+    }
+    if (!questions) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
+    const disconnect = new AbortController();
+    const onClose = () => {
+      if (!response.writableEnded) disconnect.abort(new QueryError(499, 'client_disconnected', 'Client disconnected.'));
+    };
+    response.once('close', onClose);
+    try {
+      const result = await questions.ask(id, response.locals.ownerId, question, disconnect.signal);
+      if (!response.destroyed) response.json(result);
+    } catch (error) {
+      if (!response.destroyed) throw error;
+    } finally {
+      response.removeListener('close', onClose);
+    }
+  });
+
   app.use((_request, response) => {
     response.status(404).json({ error: { code: 'not_found', message: 'Route not found.' } });
   });
 
   const handleError: ErrorRequestHandler = (error, _request, response, _next) => {
-    if (error.type === 'entity.too.large') {
+    if (error instanceof QueryError) {
+      response.status(error.status).json({ error: { code: error.code, message: error.message } });
+    } else if (error.type === 'entity.too.large') {
       response.status(413).json({ error: { code: 'payload_too_large', message: 'JSON body must not exceed 1 MiB.' } });
     } else if (error.type === 'entity.parse.failed') {
       response.status(400).json({ error: { code: 'invalid_json', message: 'Request body must be valid JSON.' } });
