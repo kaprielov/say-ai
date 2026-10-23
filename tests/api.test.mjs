@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { after, before, test } from 'node:test';
 import pg from 'pg';
 import { createApp } from '../src/app.ts';
+import { docxFixture, pdfFixture, wordFixture } from './helpers/documents.mjs';
 
 const key = randomBytes(32).toString('base64url');
 const ownerId = 'api-test-owner';
@@ -170,4 +171,140 @@ test('health remains accessible without authentication', async () => {
   const response = await fetch(`${baseUrl}/health`);
   assert.equal(response.status, 200);
   assert.equal((await response.json()).database, 'connected');
+});
+
+function uploadFile(content, filename = 'knowledge.txt', options = {}) {
+  const form = options.form ?? new FormData();
+  if (!options.form) form.append('file', new Blob([content], { type: options.type ?? 'application/octet-stream' }), filename);
+  return fetch(`${baseUrl}/knowledge-bases`, {
+    method: 'POST', headers: { Authorization: `Bearer ${key}`, ...options.headers }, body: form,
+  });
+}
+
+test('file uploads preserve source text for every supported extension and ignore MIME guesses', async () => {
+  const samples = {
+    txt: '  Unicode: caf\u00e9 \u4e16\u754c \ud83c\udf0d\r\n', md: '# Store\n\nDelivery takes two days.\n',
+    markdown: '# Returns\nReturns are accepted within 30 days.', csv: 'item,price\n"Large, blue mug",12\n',
+    tsv: 'item\tprice\nMug\t12\n', json: '{"delivery":{"days":2}}\n',
+    jsonl: '{"item":"Mug"}\n{"item":"Plate"}\n', ndjson: '{"days":2}\n',
+    yaml: 'delivery:\n  days: 2\n', yml: 'returns: 30 days\n',
+  };
+  for (const [extension, text] of Object.entries(samples)) {
+    const response = await uploadFile(text, `knowledge.${extension.toUpperCase()}`);
+    assert.equal(response.status, 201, extension);
+    const kb = await response.json();
+    assert.deepEqual(kb, { id: kb.id, status: 'pending', queryable: false });
+    const stored = await pool.query(`
+      SELECT kb.owner_id, t.source_text FROM knowledge_bases kb
+      JOIN ingestion_tasks t ON t.knowledge_base_id = kb.id WHERE kb.id = $1
+    `, [kb.id]);
+    assert.deepEqual(stored.rows, [{ owner_id: ownerId, source_text: text }]);
+  }
+  const bom = await uploadFile(new Uint8Array([0xef, 0xbb, 0xbf, 0x48, 0x69]));
+  assert.equal(bom.status, 201);
+  const kb = await bom.json();
+  assert.equal((await pool.query('SELECT source_text FROM ingestion_tasks WHERE knowledge_base_id = $1', [kb.id])).rows[0].source_text, 'Hi');
+});
+
+test('upload validation rejects unsupported, binary, empty, oversized, and malformed files without database writes', async () => {
+  const before = (await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count;
+  for (const [content, filename, status, code] of [
+    ['content', 'knowledge.pdf', 400, 'invalid_document'],
+    ['content', 'knowledge.docx', 400, 'invalid_document'],
+    ['content', 'knowledge.doc', 400, 'invalid_document'],
+    ['content', 'knowledge.rtf', 415, 'unsupported_file_type'],
+    ['content', 'knowledge', 415, 'unsupported_file_type'],
+    ['', 'empty.txt', 400, 'invalid_text'],
+    [' \r\n\t', 'blank.md', 400, 'invalid_text'],
+    ['null\0byte', 'binary.txt', 400, 'invalid_text'],
+    ['binary\u0001data', 'binary.txt', 400, 'invalid_text'],
+    [new Uint8Array([0xff, 0xfe, 0x41, 0x00]), 'utf16.txt', 400, 'invalid_file_encoding'],
+    [new Uint8Array([0xc3, 0x28]), 'invalid.txt', 400, 'invalid_file_encoding'],
+    ['x'.repeat(1024 * 1024 + 1), 'large.txt', 413, 'payload_too_large'],
+    ['x'.repeat(2 * 1024 * 1024), 'larger.txt', 413, 'payload_too_large'],
+  ]) {
+    const response = await uploadFile(content, filename);
+    assert.equal(response.status, status, filename);
+    assert.equal((await response.json()).error.code, code, filename);
+  }
+  const forms = [new FormData(), new FormData(), new FormData(), new FormData()];
+  forms[1].append('other', new Blob(['content']), 'knowledge.txt');
+  forms[2].append('file', new Blob(['content']), 'first.txt');
+  forms[2].append('file', new Blob(['content']), 'second.txt');
+  forms[3].append('file', new Blob(['content']), 'knowledge.txt');
+  forms[3].append('text', 'ambiguous content');
+  for (const form of forms) {
+    const response = await uploadFile(null, null, { form });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'invalid_upload');
+  }
+  for (const type of ['multipart/form-data', 'multipart/form-data; boundary=example']) {
+    const response = await fetch(`${baseUrl}/knowledge-bases`, {
+      method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': type }, body: '--broken',
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'invalid_upload');
+  }
+  assert.equal((await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count, before);
+});
+
+test('file byte limit accepts exactly 1 MiB and rejects oversized multibyte text', async () => {
+  const exact = await uploadFile('x'.repeat(1024 * 1024));
+  assert.equal(exact.status, 201);
+  const kb = await exact.json();
+  assert.equal((await pool.query('SELECT octet_length(source_text) AS size FROM ingestion_tasks WHERE knowledge_base_id = $1', [kb.id])).rows[0].size, 1024 * 1024);
+  const multibyte = await uploadFile('\u00e9'.repeat(600_000));
+  assert.equal(multibyte.status, 413);
+});
+
+test('upload authentication runs before multipart parsing', async () => {
+  const response = await uploadFile('x'.repeat(2 * 1024 * 1024), 'invalid.pdf', { headers: { Authorization: 'Bearer invalid' } });
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error.code, 'unauthorized');
+});
+
+test('PDF and Word uploads extract readable paragraphs and table values before persistence', async () => {
+  for (const extension of ['pdf', 'docx', 'doc']) {
+    const buffer = extension === 'pdf' ? pdfFixture() : await wordFixture(extension);
+    const response = await uploadFile(buffer, `knowledge.${extension.toUpperCase()}`);
+    assert.equal(response.status, 201, extension);
+    const kb = await response.json();
+    const text = (await pool.query('SELECT source_text FROM ingestion_tasks WHERE knowledge_base_id = $1', [kb.id])).rows[0].source_text;
+    assert.ok(text.includes('Our shop closes at 10 PM.'), extension);
+    assert.ok(text.includes('Delivery takes two days.'), extension);
+    assert.ok(text.indexOf('10 PM') < text.indexOf('two days'), extension);
+    if (extension !== 'pdf') {
+      assert.ok(text.includes('Blue mug'), extension);
+      assert.ok(text.includes('12 EUR'), extension);
+      assert.ok(text.includes('Caf\u00e9'), extension);
+    }
+  }
+});
+
+test('empty and damaged documents fail without persisting knowledge bases or parser details', async () => {
+  const before = (await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count;
+  for (const [bytes, extension, code] of [
+    [pdfFixture(['']), 'pdf', 'empty_document'],
+    [await docxFixture(''), 'docx', 'empty_document'],
+    [Buffer.from('%PDF-1.4\ninvalid'), 'pdf', 'invalid_document'],
+    [Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00]), 'docx', 'invalid_document'],
+    [Buffer.from('d0cf11e0a1b11ae100', 'hex'), 'doc', 'invalid_document'],
+  ]) {
+    const response = await uploadFile(bytes, `broken.${extension}`);
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.code, code);
+    assert.ok(!JSON.stringify(body).includes('/Volumes/'));
+  }
+  assert.equal((await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count, before);
+});
+
+test('compressed Word uploads cannot bypass the extracted text size limit', async () => {
+  const buffer = await docxFixture('x'.repeat(1024 * 1024 + 1));
+  assert.ok(buffer.length < 1024 * 1024);
+  const before = (await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count;
+  const response = await uploadFile(buffer, 'compressed.docx');
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error.code, 'extracted_text_too_large');
+  assert.equal((await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count, before);
 });

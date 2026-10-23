@@ -3,6 +3,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
 import type { QuestionAnswering } from './queries/service.js';
 import { QueryError } from './queries/errors.js';
+import { parseSource, sourceText } from './ingestion/source.js';
 
 type AppOptions = {
   pool: Pool;
@@ -40,16 +41,8 @@ export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
     next();
   });
 
-  app.post('/knowledge-bases', express.json({ limit: '1mb' }), async (request, response) => {
-    if (!request.is('application/json')) {
-      response.status(415).json({ error: { code: 'unsupported_media_type', message: 'Use Content-Type: application/json.' } });
-      return;
-    }
-    const text = request.body?.text;
-    if (typeof text !== 'string' || !text.trim() || text.includes('\0')) {
-      response.status(400).json({ error: { code: 'invalid_text', message: 'text must be a non-empty string without null characters.' } });
-      return;
-    }
+  app.post('/knowledge-bases', parseSource, async (request, response) => {
+    const text = sourceText(request.body);
 
     const client = await pool.connect();
     let id: string;
@@ -74,18 +67,12 @@ export function createApp({ pool, apiKey, ownerId, questions }: AppOptions) {
     response.location(`/knowledge-bases/${id}`).status(201).json({ id, status: 'pending', queryable: false });
   });
 
-  app.put('/knowledge-bases/:id/content', express.json({ limit: '1mb' }), async (request, response) => {
+  app.put<{ id: string }>('/knowledge-bases/:id/content', parseSource, async (request, response) => {
     const id = request.params.id;
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new QueryError(400, 'invalid_id', 'Knowledge base ID must be a valid UUID.');
     }
-    if (!request.is('application/json')) {
-      throw new QueryError(415, 'unsupported_media_type', 'Use Content-Type: application/json.');
-    }
-    const text = request.body?.text;
-    if (typeof text !== 'string' || !text.trim() || text.includes('\0')) {
-      throw new QueryError(400, 'invalid_text', 'text must be a non-empty string without null characters.');
-    }
+    const text = sourceText(request.body);
 
     const client = await pool.connect();
     let queryable: boolean;

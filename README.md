@@ -42,6 +42,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run db:check` | Check connection, pgvector, and application tables. |
 | `npm run test:db` | Verify schema constraints and vector retrieval against the migrated database. Fixtures are rolled back. |
 | `npm run test:api` | Test authentication, validation, persistence, owner isolation, and atomic creation in a temporary database. Requires database creation permission, available with the local Compose user. |
+| `npm run test:documents` | Test document extraction capacity, cancellation, and cleanup without database or provider calls. |
 | `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
 | `npm run test:queries` | Test question answering, ownership, retrieval, grounding contracts, concurrency, deadlines, and cancellation in a temporary database. No paid provider calls by default. |
 | `npm run test:replacement` | Test content replacement through the API, concurrent submissions, version switching, failure recovery, and old-version availability. Uses a temporary database and controlled providers. |
@@ -63,6 +64,30 @@ Content-Type: application/json
 ```
 
 The JSON body may be up to 1 MiB. `text` must be a non-empty string without null characters. Original whitespace is preserved. Invalid text or JSON returns `400`, oversized bodies return `413`, and unsupported content types return `415`.
+
+Alternatively, upload one text file or document using `multipart/form-data` with a single `file` field:
+
+```sh
+curl http://localhost:3000/knowledge-bases \
+  -H "Authorization: Bearer $DEVELOPER_API_KEY" \
+  -F "file=@knowledge.md"
+```
+
+Supported extensions (case-insensitive): `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.yaml`, `.yml`, `.pdf`, `.docx`, and `.doc`. Files may be up to 1 MiB of file bytes, excluding multipart framing. Plain text formats must contain valid UTF-8 text, optionally with a UTF-8 BOM. Empty or whitespace-only text files, invalid UTF-8, and binary control characters return `400`; oversized files return `413`; unsupported extensions return `415`. Send exactly one file with no additional form fields. Malformed multipart requests, missing files, extra fields, and multiple files return `400` with `invalid_upload`.
+
+Plain text formats are ingested as source text: formatting, table headers, and structured keys remain in the source. The API does not parse or validate CSV, JSON, or YAML syntax or import their records into database tables. Original text and line endings are preserved, with only an optional leading UTF-8 BOM removed.
+
+PDF and Word documents are parsed locally before the ingestion task is created. PDF extraction uses the document's embedded text layer; Word extraction supports modern `.docx` and legacy binary `.doc` files. Paragraph text and table cell values are extracted, but document styling, images, and exact table or multi-column layout are not preserved. The resulting text is indexed and quoted as source chunks. Scans and image-only documents require OCR, which is not included. Files with no readable text return `400` with `empty_document`; damaged, encrypted, or mismatched files return `400` with `invalid_document`. The API does not accept document passwords or macro-enabled `.docm` files.
+
+Document extraction runs in separate child processes with a 15-second deadline and a 256 MiB JavaScript heap limit per process. At most two extractions run concurrently per application process; further document requests return `429` with `document_capacity_full`. Timed-out extraction returns `422` with `document_timeout`. Client disconnection cancels extraction. Extracted text must also fit within 1 MiB; larger results return `413` with `extracted_text_too_large`, including compressed Word files whose upload size is small. Failed extraction does not create a knowledge base or replacement task.
+
+The uploaded filename and MIME type are not stored; MIME guesses do not determine acceptance. Document signatures and parsers validate the selected document format. Uploads are processed without writing temporary files and use the same durable ingestion pipeline as JSON submissions.
+
+```sh
+curl http://localhost:3000/knowledge-bases \
+  -H "Authorization: Bearer $DEVELOPER_API_KEY" \
+  -F "file=@knowledge.pdf"
+```
 
 The server commits the knowledge base and pending ingestion task together before returning `201 Created`, with a `Location` header and:
 
@@ -96,6 +121,16 @@ Content-Type: application/json
 ```
 
 Replaces the complete content under the existing knowledge-base ID. The same ownership checks and text validation apply as on creation: a non-empty string without null characters, in a JSON body up to 1 MiB. Invalid IDs return `400`; missing or inaccessible knowledge bases return `404`.
+
+This endpoint also accepts a file with the same formats, extraction rules, and limits as creation:
+
+```sh
+curl -X PUT http://localhost:3000/knowledge-bases/<uuid>/content \
+  -H "Authorization: Bearer $DEVELOPER_API_KEY" \
+  -F "file=@updated-knowledge.csv"
+```
+
+An uploaded file replaces the complete source content; it is not appended to existing content.
 
 The server commits the new source text and pending ingestion task before returning `202 Accepted`, with a `Location` header pointing to the status endpoint:
 

@@ -11,6 +11,7 @@ import { IngestionError } from '../src/ingestion/embeddings.ts';
 import { IngestionProcessor } from '../src/ingestion/processor.ts';
 import { QuestionAnswering } from '../src/queries/service.ts';
 import { QueryLimits } from '../src/queries/limits.ts';
+import { pdfFixture, wordFixture } from './helpers/documents.mjs';
 
 const databaseName = `say_ai_replacement_test_${randomBytes(8).toString('hex')}`;
 const key = randomBytes(32).toString('base64url');
@@ -132,6 +133,58 @@ test('replacement keeps old answers while pending and processing, then atomicall
   assert.equal(answer.answer, text);
   assert.deepEqual(answer.sources.map(source => source.text), [text]);
   assert.equal((await pool.query('SELECT count(*) FROM content_versions')).rows[0].count, '2');
+});
+
+test('uploaded files use the same replacement, ownership, and ingestion lifecycle as JSON text', async () => {
+  const kb = await createReady();
+  const text = '# Store hours\nOur shop now closes at 10 PM.\n';
+  const upload = (id, name = 'hours.md') => {
+    const body = new FormData();
+    body.append('file', new Blob([text]), name);
+    return fetch(`${url}/knowledge-bases/${id}/content`, {
+      method: 'PUT', headers: { Authorization: `Bearer ${key}` }, body,
+    });
+  };
+  assert.equal((await upload('not-a-uuid')).status, 400);
+  assert.equal((await upload(randomUUID())).status, 404);
+  const other = (await pool.query("INSERT INTO knowledge_bases (owner_id) VALUES ('other-owner') RETURNING id")).rows[0].id;
+  assert.equal((await upload(other)).status, 404);
+  assert.equal((await upload(kb.id, 'hours.rtf')).status, 415);
+  const response = await upload(kb.id);
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { id: kb.id, status: 'pending', queryable: true });
+  assert.equal((await (await question(kb.id)).json()).answer, 'Our shop closes at 6 PM.');
+  assert.equal((await upload(kb.id)).status, 409);
+  await processWith();
+  const answer = await (await question(kb.id)).json();
+  assert.equal(answer.outcome, 'answered');
+  assert.ok(answer.sources.every(source => text.includes(source.text)));
+  assert.ok(answer.sources.some(source => source.text.includes('10 PM')));
+  assert.deepEqual(await metadata(kb.id), { id: kb.id, status: 'ready', queryable: true });
+});
+
+test('PDF and Word replacements activate extracted content without changing the knowledge-base ID', async () => {
+  for (const extension of ['pdf', 'docx', 'doc']) {
+    const kb = await createReady();
+    const body = new FormData();
+    body.append('file', new Blob([extension === 'pdf' ? pdfFixture() : await wordFixture(extension)]), `replacement.${extension}`);
+    const response = await fetch(`${url}/knowledge-bases/${kb.id}/content`, {
+      method: 'PUT', headers: { Authorization: `Bearer ${key}` }, body,
+    });
+    assert.equal(response.status, 202, extension);
+    assert.equal((await response.json()).id, kb.id);
+    assert.equal((await (await question(kb.id)).json()).answer, 'Our shop closes at 6 PM.');
+    await processWith();
+    const chunks = await pool.query(`
+      SELECT c.text FROM chunks c JOIN knowledge_bases kb ON kb.active_version_id = c.version_id
+      WHERE kb.id = $1 ORDER BY c.position
+    `, [kb.id]);
+    assert.ok(chunks.rows.some(chunk => chunk.text.includes('10 PM')), extension);
+    const answer = await (await question(kb.id)).json();
+    assert.ok(answer.sources.length > 0, extension);
+    assert.ok(answer.sources.every(source => chunks.rows.some(chunk => chunk.text === source.text)), extension);
+    assert.deepEqual(await metadata(kb.id), { id: kb.id, status: 'ready', queryable: true });
+  }
 });
 
 test('an in-flight question keeps its captured version after a replacement activates', async () => {
