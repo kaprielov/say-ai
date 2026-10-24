@@ -35,7 +35,7 @@ before(async () => {
 });
 
 beforeEach(async () => {
-  await pool.query('TRUNCATE telegram_notifications, telegram_bots, chunks, content_versions, ingestion_tasks, knowledge_bases');
+  await pool.query('TRUNCATE telegram_visitors, telegram_security_notices, telegram_notifications, telegram_bots, chunks, content_versions, ingestion_tasks, knowledge_bases');
 });
 
 afterEach(async () => {
@@ -371,6 +371,7 @@ test('Responses adapter requests GPT-6 Luna structured output without reasoning,
     assert.equal(body.store, false);
     assert.equal(body.max_output_tokens, 768);
     assert.equal(body.text.format.strict, true);
+    assert.ok(body.text.format.schema.required.includes('topic'));
     assert.ok(body.instructions.includes('untrusted'));
     assert.deepEqual(JSON.parse(body.input[0].content), { question: 'How long?', context: [{ id: 'chunk-1', text: '37 days.' }] });
     return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify(answer) }] }] });
@@ -438,5 +439,15 @@ test('redirections reject invented topic citations, missing citations, and overl
     const url = await startApp(service({ answerer: { answer: async () => generated } }));
     const response = await query(url, kb.kbId, { question: 'Hello!' });
     assert.equal(response.status, 502);
+  }
+});
+
+test('only explicit off-topic redirections expose a moderation signal', async () => {
+  const kb = await readyKnowledgeBase({ text: 'The store opens at 9 AM.' });
+  for (const topic of ['social', 'related', 'missing_information', 'uncertain', 'off_topic', undefined]) {
+    const url = await startApp(service({ answerer: { answer: async () => ({ outcome: 'redirected', answer: 'Ask about opening hours.', chunk_ids: [kb.chunkId], topic }) } }));
+    const response = await query(url, kb.kbId);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).topic, topic === 'off_topic' ? 'off_topic' : undefined);
   }
 });

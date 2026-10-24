@@ -6,6 +6,7 @@ import { keyForm } from './key-form.js';
 import { QueryError } from '../queries/errors.js';
 import { transaction } from '../knowledge-bases/service.js';
 import type { TelegramService } from './service.js';
+import { serverLimits } from '../server-limits.js';
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
 
@@ -67,7 +68,7 @@ export function telegramRouter(service: TelegramService) {
       }
       next();
     } catch (error) { next(error); }
-  }, express.json({ limit: '2mb' }), async (request, response) => {
+  }, express.json({ limit: '64kb' }), async (request, response) => {
     const update = request.body;
     if (!update || !Number.isSafeInteger(update.update_id) || update.update_id < 0) { response.sendStatus(400); return; }
     // A pasted credential is never persisted in the general update queue.
@@ -85,10 +86,30 @@ export function telegramRouter(service: TelegramService) {
         else if (value[key] && typeof value[key] === 'object') pending.push(value[key]);
       }
     }
-    await service.pool.query(`
-      INSERT INTO telegram_updates (bot_id, update_id, payload) VALUES ($1, $2, $3)
-      ON CONFLICT (bot_id, update_id) DO NOTHING
-    `, [request.params.botId, update.update_id, update]);
+    const botId = request.params.botId;
+    const sender = update.message?.from?.id ?? update.callback_query?.from?.id ?? null;
+    const admitted = await transaction(service.pool, async db => {
+      // A try-lock avoids accumulating database waiters during a flood.
+      if (!(await db.query('SELECT pg_try_advisory_xact_lock(1792972800, 1) AS locked')).rows[0].locked) return false;
+      if ((await db.query('SELECT 1 FROM telegram_updates WHERE bot_id=$1 AND update_id=$2', [botId, update.update_id])).rows.length) return true;
+      const counts = (await db.query(`SELECT count(*)::int AS total,
+        count(*) FILTER(WHERE bot_id=$1)::int AS bot,
+        count(*) FILTER(WHERE bot_id IN (SELECT id FROM telegram_bots WHERE owner_id=(SELECT owner_id FROM telegram_bots WHERE id=$1)))::int AS owner,
+        count(*) FILTER(WHERE bot_id=$1 AND COALESCE(payload->'message'->'from'->>'id',payload->'callback_query'->'from'->>'id')=$2)::int AS visitor
+        FROM telegram_updates WHERE NOT done`, [botId, sender === null ? null : String(sender)])).rows[0];
+      const manager = botId === service.config.managerId;
+      const outgoing = (await db.query('SELECT count(*)::int AS count FROM telegram_outbox')).rows[0].count;
+      if (counts.total >= serverLimits.queued + (manager ? serverLimits.managerReserve : 0)
+        || counts.bot >= (manager ? serverLimits.managerReserve : serverLimits.queuedPerBot)
+        || (!manager && counts.owner >= serverLimits.queuedPerOwner)
+        || (sender !== null && counts.visitor >= serverLimits.queuedPerVisitor)
+        || outgoing >= serverLimits.outbox - 20) return false;
+      await db.query(`INSERT INTO telegram_queue_turns(bot_id) VALUES ($1) ON CONFLICT DO NOTHING`, [botId]);
+      await db.query(`INSERT INTO telegram_updates (bot_id, update_id, payload) VALUES ($1, $2, $3)
+        ON CONFLICT (bot_id, update_id) DO NOTHING`, [botId, update.update_id, update]);
+      return true;
+    });
+    if (!admitted) { response.set('Retry-After', '5').sendStatus(503); return; }
     response.sendStatus(200);
   });
   return router;

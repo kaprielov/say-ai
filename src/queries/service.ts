@@ -108,6 +108,7 @@ export class QuestionAnswering {
     }
     return {
       outcome: result.outcome as 'answered' | 'redirected', answer: result.answer,
+      ...(result.outcome === 'redirected' && result.topic === 'off_topic' ? { topic: 'off_topic' as const } : {}),
       sources: [...new Set(result.chunk_ids)].map(id => ({ chunk_id: id, text: context.find(chunk => chunk.id === id)!.text })),
     };
   }

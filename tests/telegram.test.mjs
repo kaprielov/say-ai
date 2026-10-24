@@ -11,7 +11,8 @@ import { createApp } from '../src/app.ts';
 import { TelegramService } from '../src/telegram/service.ts';
 import { managerIntroduction, managerHelp, russianManagerIntroduction, russianManagerHelp } from '../src/telegram/guide.ts';
 import { encryptToken, decryptToken, TelegramError } from '../src/telegram/client.ts';
-import { processUpdate, processOutbox, notifyIngestion, startTelegramWorker, refreshWebhooks } from '../src/telegram/worker.ts';
+import { processUpdate, processOutbox, notifyIngestion, notifySecurity, cleanupTelegram, startTelegramWorker, refreshWebhooks } from '../src/telegram/worker.ts';
+import { ownerAdmission, protectionSettings, visitorAdmission } from '../src/telegram/protection.ts';
 
 const databaseName = `say_ai_telegram_test_${randomBytes(8).toString('hex')}`;
 const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -178,14 +179,15 @@ test('token refresh preserves binding; owner transfer detaches and pauses the bo
   assert.equal(answers.length, count);
 });
 
-test('daily quota is shared by owner across tests and bots and includes failed provider calls', async () => {
+test('configured daily quotas separate tests from customers and include failed provider calls', async () => {
+  await pool.query("INSERT INTO telegram_owner_limits(owner_id,testing,daily) VALUES ('telegram:17',2,2)");
   const id = await makeBase(17); await ready(id);
   await deliver(callback(17, `test:${id}`));
   await deliver(message(17, 'First question')); await deliver(message(17, 'Second question')); await deliver(message(17, 'Over quota'));
   assert.equal(answers.filter(answer => answer.owner === 'telegram:17').length, 2);
   await deliver(callback(17, `create:${id}`)); await managed(17, 202);
-  await deliver(message(1000, 'The customer shares the same allowance'), '202');
-  assert.equal(answers.filter(answer => answer.owner === 'telegram:17').length, 2);
+  await deliver(message(1000, 'The customer has a separate allowance'), '202');
+  assert.equal(answers.filter(answer => answer.owner === 'telegram:17').length, 3);
   const failing = new TelegramService(pool, config, api, { async ask() { throw new Error('Provider failure'); } });
   await deliver(callback(18, 'new')); await deliver(message(18, 'Failing test')); await deliver(message(18, 'Test content'));
   const base = (await pool.query("SELECT id FROM knowledge_bases WHERE owner_id = 'telegram:18'")).rows[0].id;
@@ -193,7 +195,7 @@ test('daily quota is shared by owner across tests and bots and includes failed p
   const original = service; service = failing;
   await deliver(message(18, 'Provider fails'));
   service = original;
-  assert.equal((await pool.query("SELECT queries FROM telegram_usage WHERE owner_id = 'telegram:18'")).rows[0].queries, 1);
+  assert.equal((await pool.query("SELECT test_queries FROM telegram_usage WHERE owner_id = 'telegram:18'")).rows[0].test_queries, 1);
 });
 
 test('delete removes content and disconnects bots after processing is complete', async () => {
@@ -474,4 +476,135 @@ test('typing errors are ignored and stopped actions do not send late or overlap'
   t.mock.timers.tick(12000);
   await new Promise(setImmediate);
   assert.equal(count, 2);
+});
+
+async function protectionBot(user, bot) {
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES ($1,'en') ON CONFLICT DO NOTHING", [user]);
+  const id = await makeBase(user); await ready(id);
+  await deliver(callback(user, `create:${id}`)); await managed(user, bot);
+  await pool.query('INSERT INTO telegram_owner_limits(owner_id) VALUES ($1) ON CONFLICT DO NOTHING', [`telegram:${user}`]);
+  return id;
+}
+
+test('protection settings persist, validate values, respect ownership, and localize the manager UI', async () => {
+  await protectionBot(30, 300);
+  await deliver(callback(30, 'protect:300'));
+  const card = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id'='30' ORDER BY id DESC LIMIT 1")).rows[0].payload;
+  assert.match(card.text, /Spam protection/);
+  assert.ok(card.reply_markup.inline_keyboard.flat().some(button => button.text.includes('6')));
+  await deliver(callback(30, 'ps:300:repeatHours'));
+  await deliver(message(30, '8'));
+  assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=300')).rows[0].protection.repeatHours, 8);
+  await deliver(callback(30, 'ps:300:perMinute'));
+  await deliver(message(30, '31'));
+  assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=300')).rows[0].protection.perMinute, undefined);
+  await deliver(callback(31, 'ps:300:repeatHours'));
+  assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=300')).rows[0].protection.repeatHours, 8);
+  await deliver(callback(30, 'ol:testing')); await deliver(message(30, '12'));
+  assert.equal((await pool.query("SELECT testing FROM telegram_owner_limits WHERE owner_id='telegram:30'")).rows[0].testing, 12);
+  await deliver(callback(30, 'lang:ru'));
+  await deliver(callback(30, 'protect:300'));
+  assert.match((await pool.query("SELECT payload->>'text' AS text FROM telegram_outbox WHERE payload->>'chat_id'='30' ORDER BY id DESC LIMIT 1")).rows[0].text, /Защита от спама/);
+});
+
+test('only clear off-topic requests escalate; repeated abuse pauses for six hours and notices are coalesced', async () => {
+  await protectionBot(32, 302);
+  await pool.query(`UPDATE telegram_bots SET protection='{"perMinute":0,"perDay":0,"duplicateSeconds":0}' WHERE id=302`);
+  const original = service;
+  let calls = 0;
+  service = new TelegramService(pool, config, api, { async ask(_kb, _owner, question) {
+    calls++;
+    return { outcome: 'redirected', answer: 'Try asking about opening hours.', sources: [], topic: question.startsWith('off') ? 'off_topic' : question };
+  } });
+  try {
+    for (const topic of ['social', 'missing_information', 'uncertain', 'related']) await deliver(message(3200, topic), '302');
+    assert.equal((await pool.query('SELECT strikes FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0].strikes, 0);
+    for (let i = 0; i < 3; i++) await deliver(message(3200, `off ${i}`), '302');
+    let state = (await pool.query('SELECT * FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0];
+    assert.ok(state.warning_at); assert.equal(state.blocked_until, null);
+    await deliver(message(3200, 'off 3'), '302');
+    state = (await pool.query('SELECT * FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0];
+    assert.ok(new Date(state.blocked_until).getTime() - Date.now() > 14 * 60000);
+    const before = calls, until = state.blocked_until;
+    await deliver(message(3200, 'off blocked'), '302');
+    assert.equal(calls, before);
+    assert.deepEqual((await pool.query('SELECT blocked_until FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0].blocked_until, until);
+    await pool.query("UPDATE telegram_visitors SET blocked_until=now()-interval '1 second' WHERE bot_id=302 AND user_id=3200");
+    for (let i = 0; i < 4; i++) await deliver(message(3200, `off again ${i}`), '302');
+    state = (await pool.query('SELECT * FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0];
+    assert.ok(new Date(state.blocked_until).getTime() - Date.now() > 359 * 60000);
+    assert.ok(new Date(state.blocked_until).getTime() - Date.now() <= 360 * 60000);
+    await notifySecurity(service, db);
+    let notifications = (await pool.query("SELECT count(*)::int AS count FROM telegram_outbox WHERE payload->>'chat_id'='32' AND payload->>'text' LIKE '%repeated-abuse%'")).rows[0].count;
+    assert.equal(notifications, 1);
+    await pool.query('UPDATE telegram_security_notices SET pending=2 WHERE bot_id=302');
+    await notifySecurity(service, db);
+    assert.equal((await pool.query('SELECT pending FROM telegram_security_notices WHERE bot_id=302')).rows[0].pending, 2);
+    await deliver(callback(30, 'unblock:302:3200'));
+    assert.ok((await pool.query('SELECT blocked_until>now() AS blocked FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0].blocked);
+    await deliver(callback(32, 'unblock:302:3200'));
+    state = (await pool.query('SELECT * FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0];
+    assert.equal(state.blocked_until, null); assert.equal(state.repeat_until, null);
+  } finally { service = original; }
+});
+
+test('visitor defaults suppress duplicates and quotas while mandatory server caps survive disabled rules', async () => {
+  const defaults = protectionSettings();
+  assert.equal(defaults.perMinute, 5); assert.equal(defaults.perDay, 30); assert.equal(defaults.repeatHours, 6);
+  await db.query('BEGIN');
+  try {
+    assert.equal((await visitorAdmission(db, '302', 3300, 'Hello', defaults)).allowed, true);
+    assert.equal((await visitorAdmission(db, '302', 3300, ' hello  ', defaults)).allowed, false);
+    for (let i = 0; i < 4; i++) assert.equal((await visitorAdmission(db, '302', 3300, `Question ${i}`, defaults)).allowed, true);
+    assert.equal((await visitorAdmission(db, '302', 3300, 'One too many', defaults)).allowed, false);
+    const disabled = protectionSettings({ perMinute: 0, perDay: 0, duplicateSeconds: 0 });
+    for (let i = 0; i < 30; i++) assert.equal((await visitorAdmission(db, '302', 3301, `Question ${i}`, disabled)).allowed, true);
+    assert.equal((await visitorAdmission(db, '302', 3301, 'Beyond hard cap', disabled)).allowed, false);
+    for (let i = 0; i < 120; i++) assert.equal(await ownerAdmission(db, 'telegram:server-cap-test'), true);
+    assert.equal(await ownerAdmission(db, 'telegram:server-cap-test'), false);
+  } finally { await db.query('ROLLBACK'); }
+});
+
+test('webhook admission bounds visitor and bot backlog and still acknowledges duplicate deliveries', async () => {
+  const post = async update => fetch(`${baseUrl}/telegram/webhook/302`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': (await pool.query('SELECT webhook_secret FROM telegram_bots WHERE id=302')).rows[0].webhook_secret }, body: JSON.stringify(update),
+  });
+  const updates = Array.from({ length: 6 }, () => message(3400, 'Queued question'));
+  try {
+    for (const update of updates.slice(0, 5)) assert.equal((await post(update)).status, 200);
+    assert.equal((await post(updates[5])).status, 503);
+    assert.equal((await post(updates[0])).status, 200);
+    await pool.query(`INSERT INTO telegram_updates(bot_id,update_id,payload)
+      SELECT 302,900000+n,'{}' FROM generate_series(1,95) n`);
+    assert.equal((await post(message(3401, 'Another visitor'))).status, 503);
+  } finally { await pool.query('DELETE FROM telegram_updates WHERE bot_id=302 AND NOT done'); }
+});
+
+test('a delayed bot retry does not hold up another bot and cleanup retains live restrictions', async () => {
+  const slow = message(3400, '/start'), fast = message(3401, '/start');
+  await pool.query("INSERT INTO telegram_updates(bot_id,update_id,payload,available_at) VALUES (302,$1,$2,now()+interval '1 hour')", [slow.update_id, slow]);
+  await pool.query('INSERT INTO telegram_updates(bot_id,update_id,payload) VALUES (300,$1,$2)', [fast.update_id, fast]);
+  try {
+    assert.equal(await processUpdate(service, db), true);
+    assert.equal((await pool.query('SELECT done FROM telegram_updates WHERE update_id=$1 AND bot_id=300', [fast.update_id])).rows[0].done, true);
+    await pool.query("UPDATE telegram_visitors SET updated_at=now()-interval '31 days',blocked_until=now()+interval '1 hour' WHERE bot_id=302 AND user_id=3200");
+    await cleanupTelegram(db);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0].count, 1);
+  } finally { await pool.query('DELETE FROM telegram_updates WHERE bot_id=302 AND NOT done'); }
+});
+
+test('a full outbox defers security notices and continues draining instead of stopping the worker', async () => {
+  await pool.query('DELETE FROM telegram_outbox');
+  await pool.query("UPDATE telegram_security_notices SET pending=2,available_at=now()-interval '1 second' WHERE bot_id=302");
+  await pool.query(`INSERT INTO telegram_outbox(bot_id,payload)
+    SELECT 100,'{"chat_id":32,"text":"Capacity test"}'::jsonb FROM generate_series(1,5000)`);
+  try {
+    await assert.rejects(service.enqueue(db, '100', 32, 'Beyond capacity'), error => error.code === 'outbox_full');
+    await notifySecurity(service, db);
+    assert.equal((await pool.query('SELECT pending FROM telegram_security_notices WHERE bot_id=302')).rows[0].pending, 2);
+    assert.equal(await processOutbox(service, db), true);
+    await notifySecurity(service, db);
+    assert.equal((await pool.query('SELECT pending FROM telegram_security_notices WHERE bot_id=302')).rows[0].pending, 0);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_outbox')).rows[0].count, 5000);
+  } finally { await pool.query('DELETE FROM telegram_outbox'); }
 });

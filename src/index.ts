@@ -60,6 +60,11 @@ if (!shuttingDown) {
   server = app.listen(config.port, () => {
     console.log(`Server listening on http://localhost:${config.port}`);
   });
+  server.maxConnections = 200;
+  server.maxRequestsPerSocket = 1000;
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 15_000;
+  server.keepAliveTimeout = 5_000;
 }
 
 if (telegram && !shuttingDown) {

@@ -18,7 +18,9 @@ Create knowledge base — name a collection of information, then paste text or u
 
 My knowledge bases — open a base to check its status, test answers, update content, rename it, create a bot, or delete it.
 
-My bots — open a bot to see its link, choose its knowledge base, or pause and enable answers.
+My bots — open a bot to see its link, choose its knowledge base, pause and enable answers, or configure Spam protection. Protection settings include visitor quotas, duplicate suppression, off-topic warnings and pauses, and owner notifications. Restricted visitors can be unblocked here. Server safety limits always apply.
+
+Owner limits — optional daily quotas for customer questions and tests, counted separately. Both default to no daily quota.
 
 OpenAI key — securely connect, replace, or remove the key used for all your knowledge bases and bots. Document processing and answers use your OpenAI API account and billing. Never paste a key into this chat.
 
@@ -36,7 +38,7 @@ A knowledge base contains the information your bots use to answer questions. Kee
 
 Refresh status — check processing progress. Pending means queued; processing means work is in progress; ready means processing succeeded; failed means you should replace the content to try again. Answers available indicates whether a ready version exists, even while an update is processing.
 
-Test answers — send questions here to check the base before sharing a bot. Each question uses your OpenAI API account and the same daily question allowance as your bots. Use /cancel to finish testing.
+Test answers — send questions here to check the base before sharing a bot. Each question uses your OpenAI API account and a separate configurable daily test allowance. Use /cancel to finish testing.
 
 Replace content — send a new file or text to replace the entire base, not append to it. Include everything you want to keep. The previous ready version remains available during processing. Connected bots use the new version once it is ready.
 
@@ -93,7 +95,9 @@ export const russianManagerHelp: Record<HelpTopic, string> = {
 
 Мои базы знаний — откройте базу, чтобы проверить статус и ответы, обновить содержимое, изменить название, создать бота или удалить базу.
 
-Мои боты — откройте бота, чтобы получить ссылку, выбрать базу знаний, приостановить или включить ответы.
+Мои боты — откройте бота, чтобы получить ссылку, выбрать базу знаний, приостановить или включить ответы, настроить защиту от спама. В защите настраиваются квоты посетителей, повторы, предупреждения, сроки пауз и уведомления владельцу. Там же можно снять ограничение с посетителя. Технические ограничения сервера действуют всегда.
+
+Лимиты владельца — необязательные дневные квоты для вопросов клиентов и тестов, которые считаются отдельно. По умолчанию обе квоты отключены.
 
 Ключ OpenAI — подключите, замените или удалите ключ для всех ваших баз знаний и ботов через защищённую форму. Обработка документов и ответы расходуют средства вашего API-аккаунта OpenAI. Не отправляйте ключ в чат.
 
@@ -111,7 +115,7 @@ export const russianManagerHelp: Record<HelpTopic, string> = {
 
 Обновить статус — проверьте ход обработки. «Ожидает обработки» означает очередь; «обрабатывается» — работа идёт; «готова» — обработка завершена; при ошибке замените содержимое, чтобы повторить попытку. «Можно задавать вопросы» показывает, есть ли готовая версия, в том числе во время обновления.
 
-Проверить ответы — задавайте вопросы здесь перед публикацией бота. Каждый вопрос использует ваш API-аккаунт OpenAI и тот же дневной лимит, что и ваши боты. Команда /cancel завершает проверку.
+Проверить ответы — задавайте вопросы здесь перед публикацией бота. Каждый вопрос использует ваш API-аккаунт OpenAI и отдельный настраиваемый дневной лимит тестирования. Команда /cancel завершает проверку.
 
 Заменить содержимое — отправьте новый файл или текст для полной замены базы, а не добавления к ней. Включите всё, что хотите сохранить. Во время обработки доступна предыдущая готовая версия. После завершения связанные боты начнут использовать новую версию.
 

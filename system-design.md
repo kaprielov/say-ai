@@ -2,7 +2,7 @@
 
 Status: RAG API and a Telegram interface are implemented. The current implementation below is authoritative; the numbered sections preserve the original design discussion and may describe superseded proposals.
 
-Updated: 23 October 2026.
+Updated: 24 October 2026.
 
 ### Current implementation
 
@@ -59,11 +59,11 @@ Telegram adds these durable tables to the original knowledge-base/version/chunk/
 | `telegram_notifications` | Ingestion tasks awaiting a completion or failure notification. |
 | `owner_openai_keys` | Encrypted OpenAI credential, revision, and validity per owner. |
 | `openai_key_attempts` | Per-owner credential validation rate limit. |
-| `telegram_usage` | Daily admitted question counts shared across each owner's bots and manager tests. |
+| `telegram_usage` | Independent daily admitted customer and test question counts per owner. |
 
 Webhooks verify their secret header before parsing and acknowledge only after persisting the update. One Telegram worker holds its own advisory lock and processes updates in arrival order. Source changes, session changes, outgoing replies, and update completion share a transaction. Transient processing failures receive up to three attempts; a delayed update holds later work. The outbox makes up to five delivery attempts and honors Telegram rate-limit delays. Permanent credential failures can pause the affected child without disabling other bots. PostgreSQL commits and external API calls are not atomic: a crash can duplicate message delivery or a provider call and its charges.
 
-The Telegram worker is sequential; the RAG service still has its separate global query admission limit. A slow Telegram question delays other Telegram updates. Use one application instance with these workers enabled. Telegram owners can hold up to 20 bases. The daily question allowance defaults to 100 per owner per database calendar day, including admitted provider failures. This is an application quota, not an exact monetary budget. Ingestion has its existing retry and timeout bounds; conversation history is not sent to the answering model.
+The Telegram worker is sequential; the RAG service still has its separate global query admission limit. A slow Telegram question delays other Telegram updates. Use one application instance with these workers enabled. Telegram owners can hold up to 20 bases. Owner-configurable daily customer and test quotas are independent and default to no quota; admitted provider failures count. Bot owners can configure visitor limits and off-topic escalation, with 15-minute initial and six-hour repeated-abuse pauses by default. Persistent visitor state excludes full message text; only clearly off-topic validated redirections count. Repeated-abuse notifications are coalesced in the manager, which also supports unblocking. Mandatory operator controls bound HTTP work, queue depth, outgoing messages, and visitor/owner request rates; see the README for defaults. Bot scheduling preserves per-bot ordering while allowing other bots to proceed during delayed retries. These controls require load testing before their values can be treated as a capacity estimate. Ingestion has its existing retry and timeout bounds; conversation history is not sent to the answering model.
 
 ### Owner provider credentials
 

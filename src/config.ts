@@ -62,7 +62,7 @@ export function readTelegramConfig() {
   if (publicUrl.protocol !== 'https:' || publicUrl.username || publicUrl.password || publicUrl.search || publicUrl.hash) {
     throw new Error('TELEGRAM_PUBLIC_URL must be a public HTTPS base URL without credentials, query, or fragment.');
   }
-  const dailyQueries = Number(process.env.TELEGRAM_DAILY_QUERY_LIMIT ?? 100);
-  if (!Number.isSafeInteger(dailyQueries) || dailyQueries < 1) throw new Error('TELEGRAM_DAILY_QUERY_LIMIT must be a positive integer.');
+  const dailyQueries = Number(process.env.TELEGRAM_DAILY_QUERY_LIMIT ?? 0);
+  if (!Number.isSafeInteger(dailyQueries) || dailyQueries < 0) throw new Error('TELEGRAM_DAILY_QUERY_LIMIT must be a non-negative integer.');
   return { token, managerId: token.split(':')[0]!, webhookSecret, publicUrl: publicUrl.toString().replace(/\/$/, ''), encryptionKey: Buffer.from(encryptionKey, 'hex'), dailyQueries };
 }

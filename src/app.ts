@@ -7,6 +7,7 @@ import { parseSource, sourceText } from './ingestion/source.js';
 import { createKnowledgeBase, replaceKnowledgeBase, transaction } from './knowledge-bases/service.js';
 import type { TelegramService } from './telegram/service.js';
 import { telegramRouter } from './telegram/router.js';
+import { httpAdmission } from './server-limits.js';
 
 type AppOptions = {
   pool: Pool;
@@ -23,6 +24,7 @@ function keyDigest(key: string) {
 export function createApp({ pool, apiKey, ownerId, questions, telegram }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
+  app.use(httpAdmission());
   const expectedDigest = keyDigest(apiKey);
   if (telegram) app.use('/telegram', telegramRouter(telegram));
 

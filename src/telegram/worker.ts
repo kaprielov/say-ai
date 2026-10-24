@@ -1,15 +1,19 @@
-import { translator } from './i18n.js';
 import { setTimeout } from 'node:timers/promises';
 import type { PoolClient } from 'pg';
 import { QueryError } from '../queries/errors.js';
 import { TelegramError, decryptToken } from './client.js';
 import type { TelegramService, Update } from './service.js';
+import { protectionSettings } from './protection.js';
 
 export async function processUpdate(service: TelegramService, db: PoolClient) {
   await db.query('BEGIN');
   try {
     const row = (await db.query<{ id: string; bot_id: string; payload: Update; attempts: number; ready: boolean }>(`
-      SELECT *, available_at <= clock_timestamp() AS ready FROM telegram_updates WHERE NOT done ORDER BY id LIMIT 1 FOR UPDATE
+      SELECT u.*, true AS ready FROM telegram_updates u
+      LEFT JOIN telegram_queue_turns turns ON turns.bot_id=u.bot_id
+      WHERE NOT u.done AND u.available_at <= clock_timestamp()
+        AND NOT EXISTS(SELECT 1 FROM telegram_updates earlier WHERE earlier.bot_id=u.bot_id AND NOT earlier.done AND earlier.id<u.id)
+      ORDER BY COALESCE(turns.last_served,'-infinity'::timestamptz),u.id LIMIT 1 FOR UPDATE OF u
     `)).rows[0];
     if (!row || !row.ready) { await db.query('COMMIT'); return false; }
     await db.query('SAVEPOINT handling');
@@ -23,8 +27,10 @@ export async function processUpdate(service: TelegramService, db: PoolClient) {
         const message = row.payload.callback_query?.message ?? row.payload.message;
         const sender = row.payload.callback_query?.from ?? row.payload.message?.from;
         if (message?.chat.type === 'private' && sender && sender.id === message.chat.id) {
-          const t = row.bot_id === service.config.managerId ? await service.locale(db, sender.id) : translator();
-          await service.enqueue(db, row.bot_id, sender.id, t(error instanceof QueryError ? error.message : 'Unable to process this request. Please try again from /start.'));
+          const t = await service.locale(db, sender.id);
+          if (!(error instanceof QueryError && error.code === 'outbox_full')) {
+            await service.enqueue(db, row.bot_id, sender.id, t(error instanceof QueryError ? error.message : 'Unable to process this request. Please try again from /start.'));
+          }
         }
         await db.query('UPDATE telegram_updates SET done = true, payload = NULL, attempts = attempts + 1 WHERE id = $1', [row.id]);
         if (!(error instanceof QueryError)) console.error('Telegram update could not be processed.');
@@ -33,12 +39,18 @@ export async function processUpdate(service: TelegramService, db: PoolClient) {
       }
     }
     if (row.payload.callback_query) {
-      await db.query("INSERT INTO telegram_outbox (bot_id, method, payload) VALUES ($1, 'answerCallbackQuery', $2)", [row.bot_id, { callback_query_id: row.payload.callback_query.id }]);
+      try {
+        await service.reserveOutbox(db);
+        await db.query("INSERT INTO telegram_outbox (bot_id, method, payload) VALUES ($1, 'answerCallbackQuery', $2)", [row.bot_id, { callback_query_id: row.payload.callback_query.id }]);
+      } catch (error) { if (!(error instanceof QueryError && error.code === 'outbox_full')) throw error; }
     }
+    await db.query(`INSERT INTO telegram_queue_turns(bot_id,last_served) VALUES ($1,clock_timestamp())
+      ON CONFLICT(bot_id) DO UPDATE SET last_served=clock_timestamp()`, [row.bot_id]);
     await db.query('COMMIT');
     return true;
   } catch (error) {
     await db.query('ROLLBACK');
+    if (error instanceof QueryError && error.code === 'outbox_full') return false;
     throw error;
   }
 }
@@ -86,7 +98,48 @@ export async function notifyIngestion(service: TelegramService, db: PoolClient) 
       await db.query('DELETE FROM telegram_notifications WHERE task_id = $1', [row.task_id]);
     }
     await db.query('COMMIT');
-  } catch (error) { await db.query('ROLLBACK'); throw error; }
+  } catch (error) {
+    await db.query('ROLLBACK');
+    if (error instanceof QueryError && error.code === 'outbox_full') return;
+    throw error;
+  }
+}
+
+export async function notifySecurity(service: TelegramService, db: PoolClient) {
+  await db.query('BEGIN');
+  try {
+    const rows = (await db.query(`SELECT n.*,b.username,b.protection FROM telegram_security_notices n
+      JOIN telegram_bots b ON b.id=n.bot_id AND b.owner_id=n.owner_id
+      WHERE n.pending>0 AND n.available_at<=now() LIMIT 20 FOR UPDATE OF n`)).rows;
+    for (const row of rows) {
+      const user = row.owner_id.replace(/^telegram:/, '');
+      const t = await service.locale(db, user);
+      const settings = protectionSettings(row.protection);
+      if (settings.notifications) {
+        await service.enqueue(db, service.config.managerId, user,
+          t('@{username}: {count} visitor(s) received a repeated-abuse restriction after a warning and an earlier pause. Open restrictions to see expiry times and unblock visitors.', { username: row.username, count: String(row.pending) }),
+          { inline_keyboard: [[{ text: t('Restricted visitors'), callback_data: `restricted:${row.bot_id}` }], [{ text: t('Spam protection'), callback_data: `protect:${row.bot_id}` }]] });
+      }
+      await db.query(`UPDATE telegram_security_notices SET pending=0,last_sent_at=now(),
+        available_at=now()+$2*interval '1 minute' WHERE bot_id=$1`, [row.bot_id, Math.max(1, settings.noticeMinutes)]);
+    }
+    await db.query('COMMIT');
+  } catch (error) {
+    await db.query('ROLLBACK');
+    if (error instanceof QueryError && error.code === 'outbox_full') return;
+    throw error;
+  }
+}
+
+export async function cleanupTelegram(db: PoolClient) {
+  // Bounded batches avoid long cleanup transactions. Telegram retries last at most 24 hours.
+  await db.query(`DELETE FROM telegram_updates WHERE id IN (SELECT id FROM telegram_updates
+    WHERE done AND available_at<now()-interval '7 days' ORDER BY id LIMIT 2000)`);
+  await db.query(`DELETE FROM telegram_visitors WHERE (bot_id,user_id) IN
+    (SELECT bot_id,user_id FROM telegram_visitors WHERE updated_at<now()-interval '30 days'
+      AND (blocked_until IS NULL OR blocked_until<now()) AND (repeat_until IS NULL OR repeat_until<now()) LIMIT 2000)`);
+  await db.query(`DELETE FROM telegram_usage WHERE day<CURRENT_DATE-90`);
+  await db.query(`DELETE FROM telegram_owner_rate WHERE window_start<now()-interval '1 day'`);
 }
 
 // Register the current public URL for every bot, including paused ones.
@@ -136,10 +189,13 @@ export async function startTelegramWorker(service: TelegramService, onFailure: (
     throw error;
   }
   const running = (async () => {
+    let cleanedAt = 0;
     try {
       while (!controller.signal.aborted) {
         const worked = await processUpdate(service, db);
         await notifyIngestion(service, db);
+        await notifySecurity(service, db);
+        if (Date.now() - cleanedAt > 60_000) { await cleanupTelegram(db); cleanedAt = Date.now(); }
         for (let sent = 0; sent < 8; sent++) {
           if (!(await processOutbox(service, db))) break;
           await setTimeout(50, undefined, { signal: controller.signal });

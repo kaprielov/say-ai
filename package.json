@@ -19,6 +19,7 @@
     "test:queries": "node --env-file-if-exists=.env --import tsx --test tests/queries.test.mjs",
     "test:replacement": "node --env-file-if-exists=.env --import tsx --test tests/replacement.test.mjs",
     "test:telegram": "node --env-file-if-exists=.env --import tsx --test tests/telegram.test.mjs",
+    "test:server-limits": "node --import tsx --test tests/server-limits.test.mjs",
     "dev:public": "node --env-file-if-exists=.env scripts/dev-public.mjs",
     "test:dev-public": "node --test tests/dev-public.test.mjs",
     "test:owner-keys": "node --env-file-if-exists=.env --import tsx --test tests/owner-openai.test.mjs"
