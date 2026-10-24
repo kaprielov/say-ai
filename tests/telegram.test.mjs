@@ -13,6 +13,8 @@ import { managerIntroduction, managerHelp, russianManagerIntroduction, russianMa
 import { encryptToken, decryptToken, TelegramError } from '../src/telegram/client.ts';
 import { processUpdate, processOutbox, notifyIngestion, notifySecurity, cleanupTelegram, startTelegramWorker, refreshWebhooks } from '../src/telegram/worker.ts';
 import { ownerAdmission, protectionSettings, visitorAdmission } from '../src/telegram/protection.ts';
+import { helpSummaries } from '../src/telegram/manager-ui.ts';
+import { translator } from '../src/telegram/i18n.ts';
 
 const databaseName = `say_ai_telegram_test_${randomBytes(8).toString('hex')}`;
 const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -318,7 +320,7 @@ test('new users choose a language before management actions and invalid language
   await deliver(callback(30, 'lang:ru'));
   reply = await lastReply(30);
   assert.equal(reply.text, 'Управляйте базами знаний и Telegram-ботами.');
-  assert.equal(reply.reply_markup.inline_keyboard[0][0].text, 'Создать базу знаний');
+  assert.equal(reply.reply_markup.inline_keyboard[0][0].text, 'Мои боты');
   assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 30')).rows[0].language, 'ru');
 });
 
@@ -352,7 +354,7 @@ test('language can be changed from the menu or command, without affecting anothe
   await deliver(message(30, '/language'));
   assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'Русский');
   await deliver(callback(30, 'lang:en'));
-  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'Create knowledge base');
+  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'My bots');
   await deliver(callback(30, 'language'));
   await deliver(callback(30, 'lang:ru'));
   await deliver(message(11, '/start'));
@@ -376,16 +378,18 @@ test('help is available without a key, preserves input state, and routes each to
     assert.ok(!replies[0].payload.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'new'));
     await service.session(db, 11, 'upload', null, 'Draft to keep');
     await deliver(message(11, '/help'));
-    assert.equal((await lastReply(11)).text, managerHelp.menu);
+    assert.equal((await lastReply(11)).text, helpSummaries.menu);
     for (const topic of Object.keys(managerHelp)) {
       await deliver(callback(11, `help:${topic}`));
       const reply = await lastReply(11);
-      assert.equal(reply.text, managerHelp[topic]);
+      assert.equal(reply.text, helpSummaries[topic]);
+      await deliver(callback(11, `hf:${topic}`));
+      assert.equal((await lastReply(11)).text, managerHelp[topic]);
       assert.ok(reply.text.length < 4000);
       assert.ok(reply.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'menu'));
     }
     await deliver(callback(11, 'help:unknown'));
-    assert.equal((await lastReply(11)).text, managerHelp.menu);
+    assert.equal((await lastReply(11)).text, helpSummaries.menu);
     const session = (await pool.query('SELECT state, draft_name FROM telegram_sessions WHERE user_id = 11')).rows[0];
     assert.deepEqual(session, { state: 'upload', draft_name: 'Draft to keep' });
     await deliver(callback(11, 'new'));
@@ -398,9 +402,9 @@ test('help is available without a key, preserves input state, and routes each to
 test('knowledge base and bot cards offer the matching help topic', async () => {
   const base = (await pool.query("SELECT id FROM knowledge_bases WHERE owner_id = 'telegram:15' LIMIT 1")).rows[0];
   await deliver(callback(15, `kb:${base.id}`));
-  assert.ok((await lastReply(15)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'help:base'));
+  assert.ok((await lastReply(15)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === `help:base:${base.id}`));
   await deliver(callback(16, 'bot:200'));
-  assert.ok((await lastReply(16)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'help:bot'));
+  assert.ok((await lastReply(16)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'help:bot:200'));
 });
 
 
@@ -412,14 +416,16 @@ test('manager introduction and every help topic follow the selected language', a
     const welcome = (await pool.query("SELECT payload FROM telegram_outbox WHERE method = 'sendMessage' AND payload->>'chat_id' = '30' ORDER BY id DESC LIMIT 1 OFFSET 1")).rows[0].payload;
     assert.equal(welcome.text, language === 'ru' ? russianManagerIntroduction : managerIntroduction);
     assert.equal(welcome.reply_markup, undefined);
-    assert.equal(menu.reply_markup.inline_keyboard.at(-1)[0].text, language === 'ru' ? 'Справка' : 'Help');
+    assert.equal(menu.reply_markup.inline_keyboard.at(-1).at(-1).text, language === 'ru' ? 'Справка' : 'Help');
     await service.session(db, 30, 'name');
     for (const topic of Object.keys(managerHelp)) {
       await deliver(callback(30, `help:${topic}`));
       const reply = await lastReply(30);
-      assert.equal(reply.text, language === 'ru' ? russianManagerHelp[topic] : managerHelp[topic]);
+      assert.equal(reply.text, translator(language)(helpSummaries[topic]));
       assert.ok(reply.text.length < 4000);
-      assert.equal(reply.reply_markup.inline_keyboard[0][0].text, language === 'ru' ? 'Справка по менеджеру' : 'Manager help');
+      assert.equal(reply.reply_markup.inline_keyboard[0][0].text, language === 'ru' ? 'Полная инструкция' : 'Full guide');
+      await deliver(callback(30, `hf:${topic}`));
+      assert.equal((await lastReply(30)).text, language === 'ru' ? russianManagerHelp[topic] : managerHelp[topic]);
     }
     assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id = 30')).rows[0].state, 'name');
   }
@@ -491,7 +497,9 @@ test('protection settings persist, validate values, respect ownership, and local
   await deliver(callback(30, 'protect:300'));
   const card = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id'='30' ORDER BY id DESC LIMIT 1")).rows[0].payload;
   assert.match(card.text, /Spam protection/);
-  assert.ok(card.reply_markup.inline_keyboard.flat().some(button => button.text.includes('6')));
+  assert.ok(card.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'pg:300:topic'));
+  await deliver(callback(30, 'pg:300:topic'));
+  assert.ok((await lastReply(30)).reply_markup.inline_keyboard.flat().some(button => button.text.includes('6')));
   await deliver(callback(30, 'ps:300:repeatHours'));
   await deliver(message(30, '8'));
   assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=300')).rows[0].protection.repeatHours, 8);
@@ -607,4 +615,127 @@ test('a full outbox defers security notices and continues draining instead of st
     assert.equal((await pool.query('SELECT pending FROM telegram_security_notices WHERE bot_id=302')).rows[0].pending, 0);
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_outbox')).rows[0].count, 5000);
   } finally { await pool.query('DELETE FROM telegram_outbox'); }
+});
+
+async function lastPanel(user) {
+  return (await pool.query("SELECT method,payload FROM telegram_outbox WHERE method IN ('sendMessage','editMessageText') AND payload->>'chat_id'=$1 ORDER BY id DESC LIMIT 1", [String(user)])).rows[0];
+}
+
+test('grouped protection offers concise localized hints, optional details, and owner-scoped quick values', async () => {
+  await protectionBot(40, 400);
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (41,'en') ON CONFLICT DO NOTHING");
+  for (const language of ['ru', 'en']) {
+    await deliver(callback(40, `lang:${language}`));
+    await deliver(callback(40, 'protect:400'));
+    const root = await lastReply(40);
+    assert.equal(root.reply_markup.inline_keyboard.length, 5);
+    assert.ok(!root.reply_markup.inline_keyboard.flat().some(button => button.callback_data.startsWith('ps:')));
+    await deliver(callback(40, 'pg:400:messages'));
+    assert.equal((await lastReply(40)).reply_markup.inline_keyboard.length, 4);
+    await deliver(callback(40, 'ps:400:duplicateSeconds'));
+    const summary = await lastReply(40);
+    assert.ok(summary.text.length < 600);
+    assert.match(summary.text, language === 'ru' ? /Игнорировать/ : /Ignore/);
+    assert.ok(summary.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'pv:400:duplicateSeconds:60'));
+    await deliver(callback(40, 'ph:400:duplicateSeconds'));
+    const details = await lastReply(40);
+    assert.ok(details.text.length > summary.text.length);
+    assert.ok(details.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'ps:400:duplicateSeconds'));
+    await deliver(callback(40, 'pv:400:duplicateSeconds:120'));
+    assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=400')).rows[0].protection.duplicateSeconds, 120);
+    assert.ok((await lastReply(40)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'ps:400:duplicateSeconds' && button.text.includes('120')));
+  }
+  await deliver(callback(41, 'pv:400:duplicateSeconds:0'));
+  assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=400')).rows[0].protection.duplicateSeconds, 120);
+  await deliver(callback(40, 'pv:400:perMinute:31'));
+  assert.equal((await pool.query('SELECT protection FROM telegram_bots WHERE id=400')).rows[0].protection.perMinute, undefined);
+});
+
+test('callback navigation edits the current panel and help resumes input without leaving edit state behind', async () => {
+  const click = async data => {
+    const update = callback(40, data);
+    update.callback_query.message.message_id = 740;
+    await deliver(update);
+  };
+  await click('settings');
+  let panel = await lastPanel(40);
+  assert.equal(panel.method, 'editMessageText'); assert.equal(panel.payload.message_id, 740);
+  assert.ok(panel.payload.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'limits'));
+  await service.session(db, 40, 'name');
+  await click('help:base');
+  assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id=40')).rows[0].state, 'name');
+  await click('continue');
+  panel = await lastPanel(40);
+  assert.equal(panel.method, 'editMessageText');
+  assert.match(panel.payload.text, /name/);
+  await service.enqueue(db, '100', 40, 'Independent notification');
+  assert.equal((await lastPanel(40)).method, 'sendMessage');
+  await click('lang:en');
+  panel = await lastPanel(40);
+  assert.equal(panel.method, 'sendMessage');
+  assert.equal(panel.payload.text, 'Manage your knowledge bases and Telegram bots.');
+});
+
+test('five-item pages preserve binding targets and normal lists do not inherit hidden bind state', async () => {
+  await protectionBot(42, 402);
+  for (let i = 0; i < 5; i++) await makeBase(42, `Page item ${i}`);
+  await managed(42, 403);
+  await deliver(callback(42, 'choose:402'));
+  await deliver(callback(42, 'bases:1'));
+  let panel = await lastReply(42);
+  assert.ok(panel.reply_markup.inline_keyboard.flat().some(button => button.callback_data.startsWith('kb:')));
+  assert.ok(!panel.reply_markup.inline_keyboard.flat().some(button => button.callback_data.startsWith('bind:')));
+  await deliver(callback(42, 'pick:402:1'));
+  panel = await lastReply(42);
+  assert.match(panel.text, /2\/2/);
+  const bind = panel.reply_markup.inline_keyboard.flat().find(button => button.callback_data.startsWith('bind:402:')).callback_data;
+  await deliver(callback(42, 'choose:403'));
+  await deliver(callback(42, bind));
+  const bots = (await pool.query('SELECT id,knowledge_base_id FROM telegram_bots WHERE id IN (402,403) ORDER BY id')).rows;
+  assert.equal(bots[0].knowledge_base_id, bind.split(':')[2]);
+  assert.equal(bots[1].knowledge_base_id, null);
+  await deliver(callback(42, `kb:${bots[0].knowledge_base_id}:1`));
+  assert.ok((await lastReply(42)).reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'bases:1'));
+});
+
+test('uneditable panels recover as new messages while unchanged edits do not duplicate messages', async () => {
+  await pool.query('DELETE FROM telegram_outbox');
+  const original = api.call;
+  const insert = () => pool.query("INSERT INTO telegram_outbox(bot_id,method,payload) VALUES (100,'editMessageText',$1)", [{ chat_id: 40, message_id: 740, text: 'Updated panel', reply_markup: { inline_keyboard: [] } }]);
+  try {
+    await insert();
+    api.call = async () => { throw new TelegramError(400, 10, 'not_modified'); };
+    assert.equal(await processOutbox(service, db), true);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_outbox')).rows[0].count, 0);
+    await insert();
+    api.call = async () => { throw new TelegramError(400); };
+    assert.equal(await processOutbox(service, db), true);
+    const row = (await pool.query('SELECT method,payload FROM telegram_outbox')).rows[0];
+    assert.equal(row.method, 'sendMessage'); assert.equal(row.payload.message_id, undefined);
+    api.call = original;
+    assert.equal(await processOutbox(service, db), true);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_outbox')).rows[0].count, 0);
+  } finally { api.call = original; await pool.query('DELETE FROM telegram_outbox'); }
+});
+
+test('restriction pages retain their page after unblocking and all callback payloads fit Telegram limits', async () => {
+  await pool.query(`INSERT INTO telegram_visitors(bot_id,user_id,blocked_until)
+    SELECT 400,n,now()+interval '6 hours' FROM generate_series(6000,6006) n`);
+  await deliver(callback(40, 'restricted:400:1'));
+  let panel = await lastReply(40);
+  assert.match(panel.text, /2\/2/);
+  const choices = panel.reply_markup.inline_keyboard.flat();
+  const unblock = choices.find(button => button.callback_data.startsWith('unblock:400:'));
+  assert.ok(unblock.callback_data.endsWith(':1'));
+  assert.equal(choices.filter(button => button.callback_data.startsWith('unblock:')).length, 2);
+  await deliver(callback(40, unblock.callback_data));
+  panel = await lastReply(40);
+  assert.match(panel.text, /2\/2/);
+  assert.equal(panel.reply_markup.inline_keyboard.flat().filter(button => button.callback_data.startsWith('unblock:')).length, 1);
+  const payloads = (await pool.query('SELECT payload FROM telegram_outbox')).rows;
+  for (const { payload } of payloads) {
+    for (const button of payload.reply_markup?.inline_keyboard?.flat() ?? []) {
+      if (button.callback_data) assert.ok(Buffer.byteLength(button.callback_data) <= 64);
+    }
+  }
 });

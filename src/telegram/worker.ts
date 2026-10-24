@@ -69,6 +69,16 @@ export async function processOutbox(service: TelegramService, db: PoolClient) {
     await service.api.call(await service.token(row.bot_id), row.method, row.payload);
     await db.query('DELETE FROM telegram_outbox WHERE id = $1', [row.id]);
   } catch (error) {
+    if (row.method === 'editMessageText' && error instanceof TelegramError && error.code === 400) {
+      if (error.reason === 'not_modified') {
+        await db.query('DELETE FROM telegram_outbox WHERE id=$1', [row.id]);
+      } else {
+        // Deleted or uneditable panels recover through the same durable delivery queue.
+        const { message_id: _messageId, ...payload } = row.payload as Record<string, unknown>;
+        await db.query("UPDATE telegram_outbox SET method='sendMessage',payload=$2,attempts=0,available_at=now() WHERE id=$1", [row.id, payload]);
+      }
+      return true;
+    }
     if (row.attempts >= 4 || (error instanceof TelegramError && [400, 401, 403, 404].includes(error.code))) {
       if (error instanceof TelegramError && error.code === 401) {
         await db.query('UPDATE telegram_bots SET enabled = false WHERE id = $1', [row.bot_id]);
@@ -185,6 +195,7 @@ export async function startTelegramWorker(service: TelegramService, onFailure: (
       { command: 'cancel', description: 'Cancel and return to the menu' },
       { command: 'language', description: 'Change interface language' },
       { command: 'openai', description: 'Manage OpenAI key' },
+      { command: 'settings', description: 'Account settings' },
     ] });
   } catch (error) {
     db.removeListener('error', onError);

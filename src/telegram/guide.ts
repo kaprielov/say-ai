@@ -1,15 +1,10 @@
-export const managerIntroduction = `Manage your knowledge bases and Telegram bots.
+export const managerIntroduction = `Build a bot that answers using your documents.
 
-This manager helps you build Telegram bots that answer questions using your documents. A knowledge base is the information a bot uses; your bot is where people ask questions.
+1. Connect your OpenAI API key.
+2. Add information and test answers.
+3. Create a Telegram bot and share it.
 
-You are the owner: provide accurate content, test the answers, keep information up to date, and decide when your bots can answer. The manager handles document processing and connects your bots to their knowledge bases.
-
-To get started:
-1. Connect your OpenAI API key. Processing documents and answering questions use your OpenAI API account and billing.
-2. Create a knowledge base: give it a name and send your text or a file.
-3. Wait for processing, test answers, then create a Telegram bot from the knowledge base and share its link.
-
-Use Help to learn what each action does.`;
+Document processing and answers use your OpenAI API billing.`;
 
 export const managerHelp = {
   menu: `Manager help
@@ -20,16 +15,17 @@ My knowledge bases — open a base to check its status, test answers, update con
 
 My bots — open a bot to see its link, choose its knowledge base, pause and enable answers, or configure Spam protection. Protection settings include visitor quotas, duplicate suppression, off-topic warnings and pauses, and owner notifications. Restricted visitors can be unblocked here. Server safety limits always apply.
 
-Owner limits — optional daily quotas for customer questions and tests, counted separately. Both default to no daily quota.
+Settings → Owner limits — optional daily quotas for customer questions and tests, counted separately. Both default to no daily quota.
 
-OpenAI key — securely connect, replace, or remove the key used for all your knowledge bases and bots. Document processing and answers use your OpenAI API account and billing. Never paste a key into this chat.
+Settings → OpenAI key — securely connect, replace, or remove the key used for all your knowledge bases and bots. Document processing and answers use your OpenAI API account and billing. Never paste a key into this chat.
 
-Language — change the interface language.
+Settings → Language — change the interface language.
 
 Previous / Next — browse more items in a list.
 Main menu or /start — return to the menu and leave the current input step.
 /cancel — leave the current input step and return to the menu. Already accepted uploads keep processing.
-/help — open this guide without losing your current input step.
+/help — open short help without losing your current input step. Full guide opens the detailed instructions.
+/settings — open account settings.
 
 Choose a help topic below for details.`,
   base: `Knowledge base help
@@ -75,18 +71,13 @@ Main menu — return to the manager.`,
 export type HelpTopic = keyof typeof managerHelp;
 
 
-export const russianManagerIntroduction = `Управляйте базами знаний и Telegram-ботами.
+export const russianManagerIntroduction = `Создайте бота, который отвечает по вашим документам.
 
-Этот менеджер помогает создавать Telegram-ботов, которые отвечают на вопросы по вашим документам. База знаний — это информация для ответов, а бот — место, где пользователи задают вопросы.
+1. Подключите API-ключ OpenAI.
+2. Добавьте информацию и проверьте ответы.
+3. Создайте Telegram-бота и поделитесь ссылкой.
 
-Вы — владелец: предоставляете достоверные материалы, проверяете ответы, обновляете информацию и решаете, когда бот может отвечать. Менеджер обрабатывает документы и связывает ботов с базами знаний.
-
-С чего начать:
-1. Подключите свой API-ключ OpenAI. Обработка документов и ответы расходуют средства вашего API-аккаунта OpenAI.
-2. Создайте базу знаний: задайте название и отправьте текст или файл.
-3. Дождитесь обработки, проверьте ответы, затем создайте Telegram-бота из базы знаний и поделитесь ссылкой.
-
-Кнопка «Справка» объясняет каждое действие.`;
+Обработка документов и ответы оплачиваются с вашего API-аккаунта OpenAI.`;
 
 export const russianManagerHelp: Record<HelpTopic, string> = {
   menu: `Справка по менеджеру
@@ -97,7 +88,7 @@ export const russianManagerHelp: Record<HelpTopic, string> = {
 
 Мои боты — откройте бота, чтобы получить ссылку, выбрать базу знаний, приостановить или включить ответы, настроить защиту от спама. В защите настраиваются квоты посетителей, повторы, предупреждения, сроки пауз и уведомления владельцу. Там же можно снять ограничение с посетителя. Технические ограничения сервера действуют всегда.
 
-Лимиты владельца — необязательные дневные квоты для вопросов клиентов и тестов, которые считаются отдельно. По умолчанию обе квоты отключены.
+Настройки → Лимиты владельца — необязательные дневные квоты для вопросов клиентов и тестов, которые считаются отдельно. По умолчанию обе квоты отключены.
 
 Ключ OpenAI — подключите, замените или удалите ключ для всех ваших баз знаний и ботов через защищённую форму. Обработка документов и ответы расходуют средства вашего API-аккаунта OpenAI. Не отправляйте ключ в чат.
 

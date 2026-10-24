@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { QueryError } from '../queries/errors.js';
 
 export class TelegramError extends Error {
-  constructor(public readonly code: number, public readonly retryAfter = 10) {
+  constructor(public readonly code: number, public readonly retryAfter = 10, public readonly reason?: 'not_modified') {
     super('Telegram request failed.');
   }
 }
@@ -20,8 +20,9 @@ export class TelegramClient implements TelegramTransport {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
         signal: AbortSignal.timeout(20_000),
       });
-      const body = await response.json() as { ok: boolean; result: T; error_code?: number; parameters?: { retry_after?: number } };
-      if (!body.ok) throw new TelegramError(body.error_code ?? response.status, body.parameters?.retry_after);
+      const body = await response.json() as { ok: boolean; result: T; error_code?: number; description?: string; parameters?: { retry_after?: number } };
+      if (!body.ok) throw new TelegramError(body.error_code ?? response.status, body.parameters?.retry_after,
+        body.description?.startsWith('Bad Request: message is not modified') ? 'not_modified' : undefined);
       return body.result;
     } catch (error) {
       if (error instanceof TelegramError) throw error;
