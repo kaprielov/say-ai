@@ -1,0 +1,5 @@
+interface:
+  display_name: "Plan"
+  short_description: "Research complex tasks and refine an implementation plan"
+policy:
+  allow_implicit_invocation: false
