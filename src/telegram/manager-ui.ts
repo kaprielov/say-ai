@@ -32,6 +32,6 @@ export const protectionPresets: Record<ProtectionKey, number[]> = {
 export const helpSummaries = {
   menu: 'Create a knowledge base, test its answers, then connect a bot. Account settings contain your API key, language, and daily quotas.',
   base: 'Upload the information your bot should use. Test common questions before publishing. Replacing content keeps the previous version available until the update is ready.',
-  bot: 'Open your bot to try it. Choose its knowledge base, pause answers, or adjust spam protection from the bot card.',
+  bot: 'Tune answers in Answer settings, test a draft, then publish it. You can also choose a knowledge base, pause answers, and adjust spam protection.',
   key: 'Connect your own OpenAI API key. Document processing and answers use your API billing. Enter the key only in the secure form.',
 } as const;

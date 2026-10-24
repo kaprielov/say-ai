@@ -21,7 +21,7 @@ const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const config = { token: '100:manager', managerId: '100', webhookSecret: 'secret'.repeat(8), publicUrl: 'https://example.com', encryptionKey: randomBytes(32), dailyQueries: 2 };
 let pool, db, server, baseUrl, service, created = false;
 let sequence = 0;
-const calls = [], answers = [];
+const calls = [], answers = [], answerRuns = [];
 const api = {
   async call(token, method, payload) {
     calls.push({ token, method, payload });
@@ -31,9 +31,10 @@ const api = {
   },
   async download() { return Buffer.from('The store opens at 9 AM.'); },
 };
-const questions = { async ask(kb, owner, question) {
+const questions = { async ask(kb, owner, question, _signal, run) {
   answers.push({ kb, owner, question });
-  return { outcome: 'answered', answer: 'The store opens at 9 AM.', sources: [] };
+  answerRuns.push(run);
+  return { outcome: 'answered', answer: 'The store opens at 9 AM.', sources: [], ...(run?.inspect ? { debug: { revision: run.revision, contentVersion: 'test-version', elapsedMs: 12, context: [{ id: 'test-chunk', text: 'The store opens at 9 AM.' }], request: { instructions: run.settings.instructions } } } : {}) };
 } };
 
 before(async () => {
@@ -171,10 +172,14 @@ test('managed bots bind to their owner base, start enabled, and answer using the
 test('token refresh preserves binding; owner transfer detaches and pauses the bot', async () => {
   await managed(15, 200);
   assert.equal((await pool.query('SELECT enabled FROM telegram_bots WHERE id = 200')).rows[0].enabled, true);
+  await pool.query("UPDATE telegram_bots SET answer_settings=jsonb_set(answer_settings,'{draft}', '{\"instructions\":\"Private old-owner instructions\",\"detail\":\"standard\",\"language\":\"auto\",\"retrieval\":\"balanced\"}'::jsonb) WHERE id=200");
   await service.enqueue(db, '200', 999, 'An answer from the old owner');
   await managed(16, 200);
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM telegram_outbox WHERE bot_id = 200")).rows[0].count, 0);
   const bot = (await pool.query('SELECT * FROM telegram_bots WHERE id = 200')).rows[0];
+  assert.equal(bot.answer_settings.draft, null);
+  assert.equal(bot.answer_settings.published.settings.instructions, '');
+  assert.deepEqual(bot.answer_settings.history, []);
   assert.equal(bot.owner_id, 'telegram:16'); assert.equal(bot.enabled, false); assert.equal(bot.knowledge_base_id, null);
   const count = answers.length;
   await deliver(message(999, 'What is in the old base?'), '200');
@@ -737,5 +742,63 @@ test('restriction pages retain their page after unblocking and all callback payl
     for (const button of payload.reply_markup?.inline_keyboard?.flat() ?? []) {
       if (button.callback_data) assert.ok(Buffer.byteLength(button.callback_data) <= 64);
     }
+  }
+});
+
+
+test('owner bot settings support draft tests, publication, rollback, stale controls and scoped details', async () => {
+  const user = 91, target = '9101';
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (91,'en'),(92,'ru')");
+  const kb = await makeBase(user, 'Owner settings fixture');
+  await ready(kb); await managed(user, Number(target));
+  await deliver(callback(user, `bind:${target}:${kb}`));
+  await deliver(callback(user, `toggle:${target}`));
+  const state = async () => (await pool.query('SELECT answer_settings FROM telegram_bots WHERE id=$1', [target])).rows[0].answer_settings;
+  const initial = await state();
+  await deliver(callback(user, `bi:${target}:${initial.version}`));
+  await deliver(message(user, '/help'));
+  await deliver(callback(user, 'continue'));
+  assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id=91')).rows[0].state, 'bot_instructions');
+  await deliver(message(user, 'x'.repeat(4001)));
+  assert.equal((await state()).draft, null);
+  await deliver(message(user, 'Use welcoming, short sentences.'));
+  let current = await state();
+  assert.equal(current.draft.instructions, 'Use welcoming, short sentences.');
+  assert.equal(current.published.settings.instructions, '');
+  await deliver(message(93, 'When does the store open?'), target);
+  assert.equal(answerRuns.at(-1).settings.instructions, '');
+  await deliver(callback(user, `bq:${target}:draft`));
+  await deliver(message(user, 'When does the store open?'));
+  assert.equal(answerRuns.at(-1).settings.instructions, current.draft.instructions);
+  assert.equal(answerRuns.at(-1).inspect, true);
+  const quota = (await pool.query("SELECT queries,test_queries FROM telegram_usage WHERE owner_id='telegram:91' AND day=CURRENT_DATE")).rows[0];
+  assert.deepEqual(quota, { queries: 1, test_queries: 1 });
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_visitors WHERE bot_id=$1 AND user_id=91', [target])).rows[0].n, 0);
+  await deliver(callback(user, `bv:${target}:c:0`));
+  assert.ok((await pool.query("SELECT payload->>'text' AS text FROM telegram_outbox WHERE payload->>'chat_id'='91' ORDER BY id DESC LIMIT 1")).rows[0].text.includes('test-chunk'));
+  const otherBefore = answers.length;
+  for (const action of [`bs:${target}`, `bp:${target}:${current.version}`, `bq:${target}:draft`, `bv:${target}:p:0`]) await deliver(callback(92, action));
+  assert.equal(answers.length, otherBefore);
+  assert.deepEqual(await state(), current);
+  await deliver(callback(user, `bp:${target}:${current.version}`));
+  const published = await state();
+  assert.equal(published.published.settings.instructions, current.draft.instructions);
+  assert.equal(published.draft, null);
+  await deliver(callback(user, `bi:${target}:${current.version}`));
+  assert.deepEqual(await state(), published);
+  await deliver(callback(user, `br:${target}:${published.version}`));
+  assert.equal((await state()).published.settings.instructions, '');
+  const rolledBack = await state();
+  await deliver(callback(user, `bi:${target}:${rolledBack.version}`));
+  await deliver(message(user, 'An unpublished edit to discard.'));
+  const toDiscard = await state();
+  await deliver(callback(user, `bc:${target}:${toDiscard.version}`));
+  assert.deepEqual(await state(), toDiscard);
+  await deliver(callback(user, `bcc:${target}:${toDiscard.version}`));
+  assert.equal((await state()).draft, null);
+  assert.equal((await pool.query('SELECT tuning_result FROM telegram_sessions WHERE user_id=91')).rows[0].tuning_result, null);
+  const payloads = (await pool.query('SELECT payload FROM telegram_outbox')).rows.map(row => row.payload);
+  for (const payload of payloads) for (const row of payload.reply_markup?.inline_keyboard ?? []) for (const item of row) {
+    if (item.callback_data) assert.ok(Buffer.byteLength(item.callback_data) <= 64);
   }
 });

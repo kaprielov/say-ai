@@ -50,6 +50,10 @@ Main menu — leave the current input step and return to the menu.`,
 
 Your bot is the public entry point for people to ask questions. It answers in private chats using its selected knowledge base. Open the t.me link in its card to try it or share the link with others.
 
+Answer settings — edit bot instructions (up to 4000 characters), answer detail, response language, and context selection. Changes stay in a draft until you publish. Publication does not enable a paused bot. Restore previous version switches back to the previous published settings and keeps unfinished draft edits. The last 20 published versions are retained. Source evidence and moderation rules still apply.
+
+Test bot — choose the published version or draft and send questions. Tests use your API key and test allowance, without sending messages or applying penalties to visitors. Retrieved context and Full model request show the exact selected evidence and assembled generation payload. Details are stored locally until you leave testing, for up to 24 hours, and are also sent into your private manager conversation. If settings change, choose the test version again.
+
 Choose knowledge base — select one of your bases for this bot. Changing the base pauses answers; check the new selection and enable answers when ready.
 
 Publish / enable answers — allow people to receive answers. A selected knowledge base with a ready version and an available OpenAI API key are required.
@@ -121,6 +125,10 @@ export const russianManagerHelp: Record<HelpTopic, string> = {
   bot: `Справка по Telegram-боту
 
 Ваш бот — место, где пользователи задают вопросы. Он отвечает в личных чатах по выбранной базе знаний. Откройте ссылку t.me в его карточке для проверки или отправьте её другим людям.
+
+Настройки ответов — измените инструкции бота (до 4000 символов), подробность, язык и подбор контекста. Изменения сохраняются в черновик до публикации. Публикация не включает приостановленного бота. Возврат прошлой версии сохраняет незавершённый черновик. Хранятся последние 20 опубликованных версий. Правила работы с источниками и модерации сохраняются.
+
+Тестировать бота — выберите опубликованную версию или черновик и задавайте вопросы. Используются ваш API-ключ и квота тестов; посетители не получают сообщения и ограничения. «Найденный контекст» и «Полный запрос к модели» показывают выбранные фрагменты и собранный запрос. Подробности хранятся локально до выхода из тестирования, не дольше 24 часов, а также отправляются в ваш личный чат с менеджером. Если настройки изменились, выберите версию для теста заново.
 
 Выбрать базу знаний — выберите одну из ваших баз для этого бота. Смена базы приостанавливает ответы; проверьте выбор и включите ответы, когда будете готовы.
 

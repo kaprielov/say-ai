@@ -1,3 +1,4 @@
+import { BotSettings, type BotAnswerSettings, type SettingsState } from '../bots/settings.js';
 import type { OwnerCredentials } from '../providers/owner-openai.js';
 import { translator, type Language } from './i18n.js';
 import { startTyping } from './typing.js';
@@ -27,13 +28,15 @@ export type Update = {
   callback_query?: { id: string; from: User; message?: Message; data?: string };
   managed_bot?: { user: User; bot: User };
 };
-type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null };
-type Bot = { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean; protection: Record<string, number> };
+type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null; tuning_bot_id?: string | null; tuning_version?: string | null; tuning_mode?: string | null; tuning_result?: { debug?: { revision: string; contentVersion: string; elapsedMs: number; context: {id: string; text: string}[]; request: unknown } } | null };
+type Bot = { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean; protection: Record<string, number>; answer_settings: SettingsState };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const settingLabels: Record<string, string> = { standard: 'Standard', concise: 'Concise', detailed: 'Detailed', auto: 'Match question language', ru: 'Russian', en: 'English', balanced: 'Balanced', focused: 'Focused', expanded: 'Expanded' };
 const ownerId = (id: number) => `telegram:${id}`;
 const buttons = (rows: [string, string][][]) => ({ inline_keyboard: rows.map(row => row.map(([text, callback_data]) => ({ text, callback_data }))) });
 
 export class TelegramService {
+  private readonly botSettings = new BotSettings();
   private readonly panels = new WeakMap<PoolClient, { chat: number; message: number; used: boolean }>();
   constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>, readonly credentials?: OwnerCredentials) {}
 
@@ -108,7 +111,7 @@ export class TelegramService {
   async session(db: PoolClient, user: number, state: string, kb: string | null = null, name: string | null = null) {
     await db.query(`
       INSERT INTO telegram_sessions (user_id, state, knowledge_base_id, draft_name) VALUES ($1, $2, $3, $4)
-      ON CONFLICT (user_id) DO UPDATE SET state = $2, knowledge_base_id = $3, draft_name = $4, updated_at = now()
+      ON CONFLICT (user_id) DO UPDATE SET state = $2, knowledge_base_id = $3, draft_name = $4, tuning_bot_id = NULL, tuning_version = NULL, tuning_mode = NULL, tuning_result = NULL, updated_at = now()
     `, [user, state, kb, name]);
   }
 
@@ -222,7 +225,118 @@ export class TelegramService {
     await this.session(db, user, 'menu');
     await this.enqueue(db, this.config.managerId, user,
       t('@{username}\nAnswers: {status}\nKnowledge base: {base}\nhttps://t.me/{username}', { username: bot.username, status: t(bot.enabled ? 'enabled' : 'paused'), base: bot.knowledge_base_id ? (await this.base(db, user, bot.knowledge_base_id)).name : t('not selected') }),
-      buttons([[[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Spam protection'), `protect:${id}`]], [[t('Help'), `help:bot:${id}`]], [[t('Back'), `bots:${page}`], [t('Main menu'), 'menu']]]));
+      buttons([[[t('Answer settings'), `bs:${id}`], [t('Test bot'), `bt:${id}`]], [[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Spam protection'), `protect:${id}`]], [[t('Help'), `help:bot:${id}`]], [[t('Back'), `bots:${page}`], [t('Main menu'), 'menu']]]));
+  }
+
+  async showAnswerSettings(db: PoolClient, user: number, id: string) {
+    const bot = await this.bot(db, user, id);
+    const state = await this.botSettings.read(db, id, ownerId(user));
+    const t = await this.locale(db, user);
+    await this.session(db, user, 'menu');
+    const effective = state.draft ?? state.published.settings;
+    const token = `${id}:${state.version}`;
+    await this.enqueue(db, this.config.managerId, user, t('Answer settings for @{username}\nPublished version: {revision}\nDraft: {draft}\n\nInstructions: {instructions}\nDetail: {detail}\nLanguage: {language}\nContext: {retrieval}\n\nEdits affect a draft. Test it before publishing. Publishing does not enable a paused bot. The last 20 published versions are retained.', {
+      username: bot.username, revision: state.published.id.slice(0, 8), draft: t(state.draft ? 'Unpublished changes' : 'No changes'),
+      instructions: effective.instructions.slice(0, 600) || t('Default instructions'), detail: t(settingLabels[effective.detail]!), language: t(settingLabels[effective.language]!), retrieval: t(settingLabels[effective.retrieval]!),
+    }), buttons([
+      [[t('Edit instructions'), `bi:${token}`], [t('Clear instructions'), `bz:${token}`]],
+      [[t('Answer detail'), `bd:${id}`], [t('Response language'), `bl:${id}`]],
+      [[t('Context selection'), `bx:${id}`], [t('Test bot'), `bt:${id}`]],
+      ...(state.draft ? [[[t('Publish draft'), `bp:${token}`], [t('Discard draft'), `bc:${token}`]]] as [string,string][][] : []),
+      ...(state.history.length ? [[[t('Restore previous version'), `br:${token}`]]] as [string,string][][] : []),
+      [[t('Back'), `bot:${id}`], [t('Main menu'), 'menu']],
+    ]));
+  }
+
+  async botSettingsAction(db: PoolClient, user: number, data: string): Promise<boolean> {
+    const [action = '', id = '', version = '', pageText = '0'] = data.split(':');
+    if (!['bs','bi','bz','bd','bl','bx','bp','bc','bcc','br','bt','bq','bv','bds','bdc','bdd','bla','blr','ble','bxb','bxf','bxe'].includes(action)) return false;
+    const bot = await this.bot(db, user, id);
+    const state = await this.botSettings.read(db, id, ownerId(user));
+    const t = await this.locale(db, user);
+    if (action === 'bs') { await this.showAnswerSettings(db, user, id); return true; }
+    if (action === 'bv') {
+      const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id=$1', [user])).rows[0];
+      if (session?.state !== 'bot_test' || session.tuning_bot_id !== id || !session.tuning_result?.debug ||
+        Date.now() - new Date((await db.query('SELECT updated_at FROM telegram_sessions WHERE user_id=$1', [user])).rows[0].updated_at).getTime() > 86_400_000) {
+        throw new QueryError(409, 'expired_test', 'Test details expired. Run a new test.');
+      }
+      const debug = session.tuning_result.debug;
+      const text = version === 'c' ? t('Selected context\nKnowledge-base version: {version}\n\n{context}', {
+        version: debug.contentVersion, context: debug.context.map((chunk, index) => `${index + 1}. ${chunk.id}\n${chunk.text}`).join('\n\n') || t('No context was selected. No generation call was made.'),
+      }) : (debug.request ? JSON.stringify(debug.request, null, 2) : t('No context was selected. No generation call was made.'));
+      const pages = Math.max(1, Math.ceil(text.length / 3400));
+      const page = /^\d{1,4}$/.test(pageText) ? Math.min(pages - 1, Number(pageText)) : 0;
+      const paging: [string,string][] = [];
+      if (page) paging.push([t('Previous'), `bv:${id}:${version}:${page - 1}`]);
+      if (page + 1 < pages) paging.push([t('Next'), `bv:${id}:${version}:${page + 1}`]);
+      await this.enqueue(db, this.config.managerId, user, t('Test details · {page}/{pages}\n{content}', { page: String(page + 1), pages: String(pages), content: text.slice(page * 3400, (page + 1) * 3400) }), buttons([
+        ...(paging.length ? [paging] : []), [[t('Retrieved context'), `bv:${id}:c:0`], [t('Full model request'), `bv:${id}:p:0`]],
+        [[t('Back'), `bt:${id}`], [t('Main menu'), 'menu']],
+      ]));
+      return true;
+    }
+    if (['bd','bl','bx'].includes(action)) {
+      const choices: Record<string, [string,string][]> = {
+        bd: [['standard','bds'], ['concise','bdc'], ['detailed','bdd']],
+        bl: [['auto','bla'], ['ru','blr'], ['en','ble']],
+        bx: [['balanced','bxb'], ['focused','bxf'], ['expanded','bxe']],
+      };
+      const description = action === 'bx' ? 'Choose context selection. Balanced: 8 candidates / 3000 tokens. Focused: 4 / 1500, without neighbors. Expanded: 12 / 4500. Larger context may increase cost. Changes do not reindex the knowledge base.'
+        : action === 'bd' ? 'Choose answer detail. Source support and the output limit still apply.' : 'Choose the response language. Auto follows the question language.';
+      const current = state.draft ?? state.published.settings;
+      const selected = action === 'bd' ? current.detail : action === 'bl' ? current.language : current.retrieval;
+      await this.enqueue(db, this.config.managerId, user, t('Current: {value}\n\n{description}', { value: t(settingLabels[selected]!), description: t(description) }), buttons([
+        ...choices[action]!.map(([label, code]) => [[t(settingLabels[label] ?? label), `${code}:${id}:${state.version}`]] as [string,string][]),
+        [[t('Back'), `bs:${id}`], [t('Main menu'), 'menu']],
+      ]));
+      return true;
+    }
+    if (action === 'bt') {
+      await this.session(db, user, 'menu');
+      await this.enqueue(db, this.config.managerId, user, t('Test @{username}. Choose a version, then send a question. Tests use your OpenAI key and test quota. They do not send messages or apply penalties to visitors.', { username: bot.username }), buttons([
+        [[t('Test published version'), `bq:${id}:published`]],
+        ...(state.draft ? [[[t('Test draft'), `bq:${id}:draft`]]] as [string,string][][] : []),
+        [[t('Back'), `bs:${id}`], [t('Main menu'), 'menu']],
+      ]));
+      return true;
+    }
+    if (action === 'bq') {
+      if (!['published','draft'].includes(version) || (version === 'draft' && !state.draft)) throw new QueryError(409, 'no_draft', 'There is no draft to publish.');
+      if (!bot.knowledge_base_id) throw new QueryError(409, 'not_ready', 'Choose a ready knowledge base first.');
+      const kb = await this.base(db, user, bot.knowledge_base_id);
+      if (!kb.active_version_id) throw new QueryError(409, 'not_ready', 'Choose a ready knowledge base first.');
+      await this.session(db, user, 'bot_test');
+      await db.query('UPDATE telegram_sessions SET tuning_bot_id=$2,tuning_version=$3,tuning_mode=$4 WHERE user_id=$1', [user, id, state.version, version]);
+      await this.enqueue(db, this.config.managerId, user, t('Send a question for the {mode} version of @{username}. You can keep testing until you leave this screen.', { mode: t(version), username: bot.username }), buttons([[[t('Back'), `bt:${id}`], [t('Main menu'), 'menu']]]));
+      return true;
+    }
+    if (state.version !== version) throw new QueryError(409, 'stale_settings', 'Settings changed. Reopen Answer settings and try again.');
+    if (action === 'bi') {
+      await this.session(db, user, 'bot_instructions');
+      await db.query('UPDATE telegram_sessions SET tuning_bot_id=$2,tuning_version=$3 WHERE user_id=$1', [user, id, version]);
+      await this.enqueue(db, this.config.managerId, user, t('Send instructions up to 4000 characters for @{username}. Describe tone, audience, and answer format. Facts must come from the knowledge base; evidence and moderation rules still apply. Saving creates a draft.', { username: bot.username }), buttons([[[t('Back'), `bs:${id}`], [t('Main menu'), 'menu']]]));
+      return true;
+    }
+    if (action === 'bc') {
+      await this.enqueue(db, this.config.managerId, user, t('Discard all unpublished changes? Published answers will keep their current settings.'), buttons([[[t('Discard draft'), `bcc:${id}:${version}`]], [[t('Cancel'), `bs:${id}`]]]));
+      return true;
+    }
+    if (action === 'bp' || action === 'bcc' || action === 'br') {
+      if (action === 'bp') await this.botSettings.publish(db, id, ownerId(user), version);
+      if (action === 'bcc') await this.botSettings.discard(db, id, ownerId(user), version);
+      if (action === 'br') await this.botSettings.rollback(db, id, ownerId(user), version);
+    } else {
+      const settings = { ...(state.draft ?? state.published.settings) };
+      const changes: Record<string, Partial<BotAnswerSettings>> = {
+        bz: { instructions: '' }, bds: { detail: 'standard' }, bdc: { detail: 'concise' }, bdd: { detail: 'detailed' },
+        bla: { language: 'auto' }, blr: { language: 'ru' }, ble: { language: 'en' },
+        bxb: { retrieval: 'balanced' }, bxf: { retrieval: 'focused' }, bxe: { retrieval: 'expanded' },
+      };
+      await this.botSettings.save(db, id, ownerId(user), version, { ...settings, ...changes[action] });
+    }
+    await this.showAnswerSettings(db, user, id);
+    return true;
   }
 
   async showProtection(db: PoolClient, user: number, id: string, group?: ProtectionGroup) {
@@ -420,8 +534,26 @@ export class TelegramService {
       if (!(await this.credentials.available(ownerId(user.id)))) return this.keySettings(db, user.id);
     }
     if (callback?.data) {
+      if (await this.botSettingsAction(db, user.id, callback.data)) return;
       if (await this.protectionAction(db, user.id, callback.data)) return;
       return this.action(db, user.id, callback.data);
+    }
+    if (session.state === 'bot_instructions') {
+      if (!text?.trim()) throw new QueryError(400, 'invalid_bot_settings', 'Send text instructions, or use Clear instructions to reset them.');
+      if (!session.tuning_bot_id || !session.tuning_version) return this.menu(db, user.id);
+      const state = await this.botSettings.read(db, session.tuning_bot_id, ownerId(user.id));
+      await this.botSettings.save(db, session.tuning_bot_id, ownerId(user.id), session.tuning_version, { ...(state.draft ?? state.published.settings), instructions: text ?? '' });
+      return this.showAnswerSettings(db, user.id, session.tuning_bot_id);
+    }
+    if (session.state === 'bot_test' && text && session.tuning_bot_id) {
+      const target = await this.bot(db, user.id, session.tuning_bot_id);
+      if (!target.knowledge_base_id) throw new QueryError(409, 'not_ready', t('Choose a ready knowledge base first.'));
+      const state = await this.botSettings.read(db, target.id, ownerId(user.id));
+      if (state.version !== session.tuning_version) throw new QueryError(409, 'stale_settings', 'Settings changed. Reopen Answer settings and try again.');
+      return this.answer(db, botId, user.id, ownerId(user.id), target.knowledge_base_id, text, {
+        settings: session.tuning_mode === 'draft' ? state.draft ?? state.published.settings : state.published.settings,
+        revision: session.tuning_mode === 'draft' ? state.version : state.published.id, inspect: true, target: target.id,
+      });
     }
     if (session.state === 'protection_setting' || session.state === 'owner_limit') return this.saveProtectionSetting(db, user.id, session, text);
     if (session.state === 'name' || session.state === 'rename') {
@@ -484,6 +616,7 @@ export class TelegramService {
     if (action === 'settings') return this.settings(db, user);
     if (action === 'continue') {
       const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id=$1', [user])).rows[0];
+      if (session?.tuning_bot_id) return this.botSettingsAction(db, user, session.state === 'bot_instructions' ? `bi:${session.tuning_bot_id}:${session.tuning_version}` : `bq:${session.tuning_bot_id}:${session.tuning_mode}`);
       if (session?.state === 'protection_setting' && session.draft_name) {
         const [bot, key] = session.draft_name.split(':');
         if (Object.hasOwn(protectionFields, key!)) return this.showProtectionField(db, user, bot!, key as ProtectionKey);
@@ -519,7 +652,7 @@ export class TelegramService {
       const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
       if (!extra && session?.state !== 'bind') throw new QueryError(409, 'expired_action', t('Choose the bot again from My bots.'));
       const bot = await this.bot(db, user, extra ? id : session.draft_name!);
-      await db.query('UPDATE telegram_bots SET knowledge_base_id = $1, enabled = false WHERE id = $2', [baseId, bot.id]);
+      await db.query("UPDATE telegram_bots SET knowledge_base_id = $1, enabled = false, answer_settings=jsonb_set(answer_settings,'{version}',to_jsonb(gen_random_uuid()::text)) WHERE id = $2", [baseId, bot.id]);
       await this.session(db, user, 'menu');
       return this.showBot(db, user, bot.id);
     }
@@ -567,14 +700,19 @@ export class TelegramService {
     }
   }
 
-  async answer(db: PoolClient, botId: string, chat: number, owner: string, kb: string, question: string) {
+  async answer(db: PoolClient, botId: string, chat: number, owner: string, kb: string, question: string, run?: { settings: BotAnswerSettings; revision: string; inspect: boolean; target: string }) {
     const testing = botId === this.config.managerId;
     const t = await this.locale(db, chat);
     if (!question.trim() || question.includes('\0') || question.length > 4096) throw new QueryError(400, 'invalid_question', t('Send a question between 1 and 4096 characters.'));
     if (!this.questions) throw new QueryError(503, 'querying_unavailable', t('Question answering is not configured.'));
-    const bot = testing ? undefined : (await db.query<Bot>('SELECT * FROM telegram_bots WHERE id=$1', [botId])).rows[0];
+    const bot = testing ? undefined : (await db.query<Bot>('SELECT * FROM telegram_bots WHERE id=$1 AND owner_id=$2', [botId, owner])).rows[0];
     const settings = protectionSettings(bot?.protection);
     if (!testing) {
+      if (!bot?.enabled || !bot.knowledge_base_id) {
+        await this.enqueue(db, botId, chat, t('This bot is currently paused.'));
+        return;
+      }
+      kb = bot.knowledge_base_id;
       const admission = await visitorAdmission(db, botId, chat, question, settings);
       if (!admission.allowed) {
         if (admission.message) await this.enqueue(db, botId, chat, t(admission.message));
@@ -596,8 +734,18 @@ export class TelegramService {
     if (!quota.rows[0]) throw new QueryError(429, 'daily_limit', t('The daily question limit for this owner has been reached.'));
     const stopTyping = startTyping(this.api, this.token(botId), chat);
     try {
-      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000));
+      if (run) await db.query('UPDATE telegram_sessions SET tuning_result=NULL WHERE user_id=$1', [chat]);
+      const configuration = run ?? (bot ? { settings: bot.answer_settings.published.settings, revision: bot.answer_settings.published.id } : undefined);
+      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration);
       await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?'));
+      if (run) {
+        await db.query('UPDATE telegram_sessions SET tuning_result=$2, updated_at=now() WHERE user_id=$1', [chat, { debug: result.debug }]);
+        await this.enqueue(db, this.config.managerId, chat, t('Test result: {outcome}. Version: {revision}. Duration: {ms} ms. Details are kept until you leave testing, for up to 24 hours.', { outcome: t(result.outcome), revision: run.revision.slice(0, 8), ms: String(result.debug?.elapsedMs ?? 0) }), buttons([
+          ...(result.debug ? [[[t('Retrieved context'), `bv:${run.target}:c:0`], [t('Full model request'), `bv:${run.target}:p:0`]]] as [string,string][][] : []),
+          [[t('Choose test version'), `bt:${run.target}`], [t('Answer settings'), `bs:${run.target}`]],
+          [[t('Back'), `bot:${run.target}`], [t('Main menu'), 'menu']],
+        ]));
+      }
       if (!testing && result.outcome === 'redirected' && 'topic' in result && result.topic === 'off_topic') {
         const action = await recordOffTopic(db, botId, chat, owner, settings);
         if (action) await this.enqueue(db, botId, chat, t(action.message, { minutes: String(action.minutes) }));
@@ -605,6 +753,9 @@ export class TelegramService {
     } catch (error) {
       // Keep the quota reservation even when a paid provider request fails.
       await this.enqueue(db, botId, chat, error instanceof QueryError && error.status < 500 ? t(error.message) : t('I could not answer just now. Please try your question again shortly.'));
+      if (run) {
+        await this.enqueue(db, this.config.managerId, chat, t('Test failed: {code}. You can send another question or return to settings.', { code: error instanceof QueryError ? error.code : 'query_processing_failed' }), buttons([[[t('Answer settings'), `bs:${run.target}`], [t('Back'), `bt:${run.target}`]]]));
+      }
     } finally {
       stopTyping();
     }
@@ -638,7 +789,7 @@ export class TelegramService {
       if (existing) {
         await db.query('DELETE FROM telegram_visitors WHERE bot_id=$1', [id]);
         await db.query('DELETE FROM telegram_security_notices WHERE bot_id=$1', [id]);
-        await db.query("UPDATE telegram_bots SET protection='{}' WHERE id=$1", [id]);
+        await db.query("UPDATE telegram_bots SET protection='{}', answer_settings=DEFAULT WHERE id=$1", [id]);
       }
     }
     await db.query(`

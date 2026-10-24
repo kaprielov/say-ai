@@ -1,10 +1,12 @@
+import { validateBotSettings, type BotAnswerSettings } from '../bots/settings.js';
+import { answerRequest } from './answerer.js';
 import type { Pool } from 'pg';
 import { countTokens } from '../ingestion/chunking.js';
 import { validateVectors, type Embedder } from '../ingestion/embeddings.js';
 import type { Answerer, ContextChunk, GeneratedAnswer } from './answerer.js';
 import { QueryError } from './errors.js';
 import { QUERY_DEADLINE_MS, queryLimits, type QueryLimits } from './limits.js';
-import { contextConfig, selectContext, type PositionedChunk } from './context.js';
+import { contextConfig, retrievalProfiles, selectContext, type PositionedChunk } from './context.js';
 
 type QueryOptions = {
   pool: Pool;
@@ -20,7 +22,10 @@ const refusal = () => ({ outcome: 'insufficient_context' as const, answer: null,
 export class QuestionAnswering {
   constructor(private readonly options: QueryOptions) {}
 
-  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal) {
+  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean }) {
+    const started = performance.now();
+    const settings = run ? validateBotSettings(run.settings) : undefined;
+    const selectedConfig = retrievalProfiles[settings?.retrieval ?? 'balanced'] ?? contextConfig;
     const { pool, embedder, answerer, deadlineMs = QUERY_DEADLINE_MS, limits = queryLimits } = this.options;
     const release = limits.enter();
     const controller = new AbortController();
@@ -70,8 +75,8 @@ export class QuestionAnswering {
         FROM chunks c JOIN content_versions v ON v.id = c.version_id
         WHERE c.version_id = $2 AND v.knowledge_base_id = $3
         ORDER BY c.embedding <=> $1::vector, c.position LIMIT $4
-      `, [JSON.stringify(vectors[0]), version.version_id, id, contextConfig.candidates]));
-      const positions = [...new Set(matches.rows.slice(0, contextConfig.seeds)
+      `, [JSON.stringify(vectors[0]), version.version_id, id, selectedConfig.candidates]));
+      const positions = [...new Set(matches.rows.slice(0, selectedConfig.seeds)
         .flatMap(match => [match.position + 1, match.position - 1]).filter(position => position >= 0))];
       const neighbors = positions.length ? await call(() => pool.query<PositionedChunk>(`
         SELECT c.id, c.text, c.position
@@ -79,11 +84,16 @@ export class QuestionAnswering {
         WHERE c.version_id = $1 AND v.knowledge_base_id = $2 AND c.position = ANY($3::int[])
         ORDER BY c.position
       `, [version.version_id, id, positions])) : { rows: [] };
-      const context = selectContext(matches.rows, neighbors.rows);
+      const context = selectContext(matches.rows, neighbors.rows, selectedConfig);
       check();
-      if (!context.length) return refusal();
-      const generated = await call(() => providers.answerer.answer(question, context, signal));
-      return this.validateAnswer(generated, context);
+      const result = context.length
+        ? this.validateAnswer(await call(() => providers.answerer.answer(question, context, signal, settings)), context)
+        : refusal();
+      return { ...result, ...(run?.inspect ? { debug: {
+        revision: run.revision, contentVersion: version.version_id, context,
+        request: context.length ? answerRequest(question, context, settings) : null,
+        elapsedMs: Math.round(performance.now() - started),
+      } } : {}) };
     } catch (error) {
       check();
       if (error instanceof QueryError) throw error;

@@ -451,3 +451,22 @@ test('only explicit off-topic redirections expose a moderation signal', async ()
     assert.equal((await response.json()).topic, topic === 'off_topic' ? 'off_topic' : undefined);
   }
 });
+
+test('bot run captures its settings, inspects selected context, and preserves default HTTP output', async () => {
+  const { kbId, chunkId, versionId } = await readyKnowledgeBase();
+  const preferences = { instructions: 'Be welcoming.', detail: 'concise', language: 'en', retrieval: 'focused' };
+  let captured;
+  const questions = service({ answerer: { answer: async (_q, context, _signal, settings) => {
+    captured = settings;
+    return { outcome: 'answered', answer: 'Logs last 37 days.', chunk_ids: [context[0].id] };
+  } } });
+  const result = await questions.ask(kbId, ownerId, 'How long?', new AbortController().signal, { settings: preferences, revision: 'draft-1', inspect: true });
+  assert.deepEqual(captured, preferences);
+  assert.equal(result.debug.revision, 'draft-1');
+  assert.equal(result.debug.contentVersion, versionId);
+  assert.equal(result.debug.context[0].id, chunkId);
+  assert.ok(result.debug.request.instructions.includes('Be welcoming.'));
+  assert.ok(result.debug.request.instructions.includes('Every factual claim'));
+  const ordinary = await questions.ask(kbId, ownerId, 'How long?', new AbortController().signal);
+  assert.equal('debug' in ordinary, false);
+});

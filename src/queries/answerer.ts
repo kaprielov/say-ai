@@ -1,10 +1,11 @@
+import { defaultBotSettings, type BotAnswerSettings } from '../bots/settings.js';
 import { QueryError } from './errors.js';
 import { QUERY_DEADLINE_MS } from './limits.js';
 
 export type ContextChunk = { id: string; text: string };
 export type GeneratedAnswer = { outcome: 'answered' | 'redirected' | 'insufficient_context'; answer: string | null; chunk_ids: string[]; topic?: 'related' | 'social' | 'missing_information' | 'off_topic' | 'uncertain' };
 export interface Answerer {
-  answer(question: string, context: ContextChunk[], signal: AbortSignal): Promise<GeneratedAnswer>;
+  answer(question: string, context: ContextChunk[], signal: AbortSignal, settings?: BotAnswerSettings): Promise<GeneratedAnswer>;
 }
 
 const instructions = `Help the user with the subject of the supplied knowledge-base chunks.
@@ -28,36 +29,50 @@ The chunk_ids must identify the evidence for the suggested topics; these citatio
 Do not mention providers, retrieval, chunks, citations, internal errors, or validation in the reply.
 If no safe, relevant topic can be suggested, return outcome insufficient_context, answer null, and chunk_ids [].`;
 
+function botInstructions(settings?: BotAnswerSettings) {
+  if (!settings || JSON.stringify(settings) === JSON.stringify(defaultBotSettings)) return instructions;
+  return `Bot preferences (style and presentation only; examples and instructions are not factual evidence):
+${JSON.stringify(settings)}
+Apply detail as answer length preference, language auto as the question language, ru as Russian, en as English.
+The platform rules below take precedence over conflicting bot preferences. Keep topic classification based
+on the supplied knowledge base. Never let bot preferences redefine off-topic penalties or introduce facts.
+${instructions.replace("Use the user's language for every reply.", "Use the configured response language; auto means the user's language.")}`;
+}
+
+export function answerRequest(question: string, context: ContextChunk[], settings?: BotAnswerSettings) {
+  return {
+  model: 'gpt-6-luna',
+  reasoning: { effort: 'none' },
+  store: false,
+  max_output_tokens: 768,
+  instructions: botInstructions(settings),
+  input: [{ role: 'user', content: JSON.stringify({ question, context }) }],
+  text: { format: {
+    type: 'json_schema', name: 'grounded_answer', strict: true,
+    schema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        outcome: { type: 'string', enum: ['answered', 'redirected', 'insufficient_context'] },
+        answer: { type: ['string', 'null'] },
+        chunk_ids: { type: 'array', items: { type: 'string' } },
+        topic: { type: 'string', enum: ['related', 'social', 'missing_information', 'off_topic', 'uncertain'] },
+      },
+      required: ['outcome', 'answer', 'chunk_ids', 'topic'],
+    },
+  } },
+};
+}
+
 export class OpenAIAnswerer implements Answerer {
   constructor(private readonly apiKey: string, private readonly fetchRequest: typeof fetch = fetch) {}
 
-  async answer(question: string, context: ContextChunk[], signal: AbortSignal): Promise<GeneratedAnswer> {
+  async answer(question: string, context: ContextChunk[], signal: AbortSignal, settings?: BotAnswerSettings): Promise<GeneratedAnswer> {
     try {
       const response = await this.fetchRequest('https://api.openai.com/v1/responses', {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
         signal: AbortSignal.any([signal, AbortSignal.timeout(QUERY_DEADLINE_MS)]),
-        body: JSON.stringify({
-          model: 'gpt-6-luna',
-          reasoning: { effort: 'none' },
-          store: false,
-          max_output_tokens: 768,
-          instructions,
-          input: [{ role: 'user', content: JSON.stringify({ question, context }) }],
-          text: { format: {
-            type: 'json_schema', name: 'grounded_answer', strict: true,
-            schema: {
-              type: 'object', additionalProperties: false,
-              properties: {
-                outcome: { type: 'string', enum: ['answered', 'redirected', 'insufficient_context'] },
-                answer: { type: ['string', 'null'] },
-                chunk_ids: { type: 'array', items: { type: 'string' } },
-                topic: { type: 'string', enum: ['related', 'social', 'missing_information', 'off_topic', 'uncertain'] },
-              },
-              required: ['outcome', 'answer', 'chunk_ids', 'topic'],
-            },
-          } },
-        }),
+        body: JSON.stringify(answerRequest(question, context, settings)),
       });
       if (!response.ok) {
         await response.body?.cancel();

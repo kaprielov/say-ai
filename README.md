@@ -203,7 +203,7 @@ Operations still running after cancellation remain counted until they settle. A 
 | `503` | OpenAI credentials are absent or the stored embedding configuration is unsupported. Ingestion can be paused independently of querying. |
 | `504` | The query exceeded its 30-second deadline. |
 
-A redirection or insufficient-evidence outcome is a successful `200` response, separate from a provider-level safety refusal or processing failure. The application does not persist questions or answers. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
+A redirection or insufficient-evidence outcome is a successful `200` response, separate from a provider-level safety refusal or processing failure. Production queries do not maintain a conversation history. Owner-initiated bot tests can retain the latest diagnostic snapshot as described under Per-bot answer settings and testing. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
 
 To run the optional paid live check using a synthetic knowledge base in a temporary database:
 
@@ -333,3 +333,51 @@ Telegram webhook delivery is capped at two connections per bot. Temporary Cloudf
 The Telegram worker removes completed update identifiers after seven days in bounded batches, inactive visitor state after 30 days (preserving active restrictions/repeat windows), daily usage after 90 days, and expired owner-rate rows after one day. Source questions and generated answers are not stored by the query API. Queue payloads are cleared on completion. Telegram queued payloads and outgoing messages still exist until processed/delivered. Sustained-load and representative multilingual topic-classification evaluation remain required before production rollout.
 
 Run `npm run test:telegram` for isolated-database integration tests with controlled Telegram and answer transports. No real Telegram or paid OpenAI requests are made by these tests.
+
+### Per-bot answer settings and testing
+
+Open **My bots → a bot → Answer settings** to edit instructions, answer detail,
+response language, and context selection. Changes stay in a draft. **Publish draft**
+activates them for subsequent requests without enabling a paused bot. **Restore
+previous version** switches to the previous published settings while preserving any
+draft. The last 20 published versions are retained. Changing a bot's owner clears
+its settings and history. Knowledge-base tests and HTTP queries keep the default
+answering profile.
+
+Instructions can contain up to 4000 characters. They guide presentation and audience;
+source-evidence requirements, structured output, and moderation rules remain platform
+controlled. Model behavior still needs semantic evaluation. Context presets are:
+
+| Profile | Candidates | Seed chunks | Context budget | Neighbor budget |
+| --- | --- | --- | --- | --- |
+| Balanced (default) | 8 | 3 | 3000 tokens | 1000 tokens |
+| Focused | 4 | 2 | 1500 tokens | 0 tokens |
+| Expanded | 12 | 4 | 4500 tokens | 1500 tokens |
+
+These budgets use the existing `cl100k_base` convention. Changing a profile does not
+reindex the knowledge base. Expanded context can increase provider cost and is not
+an assurance of better answers. Answer detail remains subject to the existing
+768-output-token cap.
+
+**Test bot** runs a question through the normal answering pipeline using either the
+published settings or the draft. It uses the owner's OpenAI key and test quota,
+without customer delivery or visitor penalties. Results show the outcome, settings
+revision, elapsed processing time, selected source context, and the assembled model
+request without transport headers. Changing settings requires reselecting a test
+version. Every question captures the ready knowledge-base version at execution time;
+this is not a fixed-version comparison experiment.
+
+Only the latest test's details are kept in the owner's manager session. Leaving
+testing clears them; details expire after 24 hours and background cleanup removes
+expired content in bounded batches. Details explicitly opened in Telegram remain
+in that private conversation under Telegram's normal message retention. Production
+question history, analytics dashboards, Langfuse, and batch evaluation are outside
+this release. Failed test calls show a sanitized error code rather than provider
+response bodies; full context inspection currently requires a completed query.
+
+Apply the new database migration before running this version. The additional focused
+settings checks run with:
+
+```sh
+node --env-file-if-exists=.env --import tsx --test tests/bot-settings.test.mjs
+```
