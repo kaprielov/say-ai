@@ -30,7 +30,7 @@ Before editing a flow, trace its entry point, session transitions, feedback, and
 - [Telegram worker](../../../src/telegram/worker.ts): durable delivery, retries, and edit recovery.
 - [Project README](../../../README.md#telegram-interface): setup and current manager behavior. Inspect nearby UI configuration modules when present.
 
-For navigation, callback, or session changes, run the build and relevant Telegram tests with controlled transports. Cover meaningful behaviors such as returning from help to input, keeping the originating page, rejecting another owner's callbacks, custom-value validation, and edit recovery. When credential flows change, include the owner-key tests. For copy-only changes, review clarity and translation coverage without adding tests that merely duplicate wording.
+Follow the [project testing policy](../say-ai-testing/SKILL.md) to select checks and avoid redundant tests. For navigation, callback, or session changes, run the build and relevant Telegram tests with controlled transports. Cover meaningful behaviors such as returning from help to input, keeping the originating page, rejecting another owner's callbacks, custom-value validation, and edit recovery. When credential flows change, include the owner-key tests. For copy-only changes, review clarity and translation coverage without adding tests that merely duplicate wording.
 
 ## Design references
 
