@@ -1,7 +1,7 @@
 import type { OwnerCredentials } from '../providers/owner-openai.js';
 import { translator, type Language } from './i18n.js';
 import { startTyping } from './typing.js';
-import { protectionFields, protectionSettings, visitorAdmission, ownerAdmission, recordOffTopic, type ProtectionKey } from './protection.js';
+import { protectionFields, protectionHelp, protectionSettings, visitorAdmission, ownerAdmission, recordOffTopic, type ProtectionKey } from './protection.js';
 import { serverLimits } from '../server-limits.js';
 import { webhookDelivery } from './webhook-delivery.js';
 import { managerHelp, managerIntroduction, type HelpTopic } from './guide.js';
@@ -186,7 +186,7 @@ export class TelegramService {
     const settings = protectionSettings(bot.protection);
     await this.session(db, user, 'menu');
     await this.enqueue(db, this.config.managerId, user,
-      t('Spam protection for @{username}. Select a setting to change it. Zero disables that rule. Server safety limits always apply.', { username: bot.username }),
+      t('Spam protection for @{username}. Select a setting to read its explanation and change its value. Each explanation describes what zero means. Server safety limits always apply.', { username: bot.username }),
       buttons([
         ...Object.entries(protectionFields).map(([key, field]) => [[`${t(field.label)}: ${settings[key as ProtectionKey]}`, `ps:${id}:${key}`] as [string, string]]),
         [[t('Restricted visitors'), `restricted:${id}`]],
@@ -219,7 +219,13 @@ export class TelegramService {
     if (action === 'ps') {
       if (!Object.hasOwn(protectionFields, key!)) throw new QueryError(400, 'invalid_setting', t('Invalid protection setting.'));
       await this.session(db, user, 'protection_setting', null, `${bot.id}:${key}`);
-      await this.enqueue(db, this.config.managerId, user, t('Send a whole number from 0 to {max}. Zero disables this rule. Use /cancel to leave.', { max: String(protectionFields[key as ProtectionKey].max) }));
+      const settingKey = key as ProtectionKey;
+      const field = protectionFields[settingKey];
+      await this.enqueue(db, this.config.managerId, user,
+        `${t(field.label)}\n\n${t(protectionHelp[settingKey])}\n\n` +
+        t('Current value: {current}. Default: {default}.', { current: String(protectionSettings(bot.protection)[settingKey]), default: String(field.value) }) + '\n' +
+        t('Send a whole number from 0 to {max}, or use the button below to go back.', { max: String(field.max) }),
+        buttons([[[t('Spam protection'), `protect:${bot.id}`]]]));
     }
     if (action === 'unblock') {
       if (!/^\d{1,16}$/.test(key!)) throw new QueryError(400, 'invalid_setting', t('Invalid protection setting.'));
@@ -242,7 +248,7 @@ export class TelegramService {
     const [id, key] = session.draft_name!.split(':');
     const field = session.state === 'owner_limit' ? { max: 1000000 } : protectionFields[key as ProtectionKey];
     if (!text || !/^\d{1,7}$/.test(text.trim()) || Number(text) > field.max) {
-      throw new QueryError(400, 'invalid_setting', t('Send a whole number from 0 to {max}. Zero disables this rule. Use /cancel to leave.', { max: String(field.max) }));
+      throw new QueryError(400, 'invalid_setting', t('Send a whole number from 0 to {max}.', { max: String(field.max) }));
     }
     if (session.state === 'owner_limit') {
       await db.query(`INSERT INTO telegram_owner_limits(owner_id,daily) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [ownerId(user), this.config.dailyQueries]);

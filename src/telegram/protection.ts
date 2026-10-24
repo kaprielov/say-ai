@@ -5,7 +5,7 @@ import { serverLimits } from '../server-limits.js';
 export const protectionFields = {
   perMinute: { label: 'Questions per minute', value: 5, max: 30 },
   perDay: { label: 'Questions per day', value: 30, max: 1000000 },
-  duplicateSeconds: { label: 'Duplicate window (seconds)', value: 60, max: 3600 },
+  duplicateSeconds: { label: 'Ignore repeated questions (seconds)', value: 60, max: 3600 },
   strikes: { label: 'Off-topic requests before warning', value: 3, max: 100 },
   windowMinutes: { label: 'Off-topic window (minutes)', value: 10, max: 1440 },
   pauseMinutes: { label: 'First pause (minutes)', value: 15, max: 10080 },
@@ -15,6 +15,18 @@ export const protectionFields = {
   noticeMinutes: { label: 'Notification interval (minutes)', value: 15, max: 1440 },
 } as const;
 export type ProtectionKey = keyof typeof protectionFields;
+export const protectionHelp: Record<ProtectionKey, string> = {
+  perMinute: 'How many questions one visitor can ask this bot in a minute. For example, 5 allows five questions, then asks the visitor to wait. Zero removes your custom limit; the server limit of 30 questions per minute still applies.',
+  perDay: 'How many questions one visitor can ask this bot per calendar day. For example, 30 pauses new questions after the thirtieth until the next day. Days follow the service time zone. Zero removes this daily limit.',
+  duplicateSeconds: 'How long to ignore a repeat of the visitor\'s last accepted question. For example, 60 means sending the same question again within one minute will not generate another answer or spend money on another model request. Letter case and extra spaces do not matter. Zero allows repeated questions.',
+  strikes: 'How many clearly off-topic questions trigger a warning within the off-topic window. For example, 3 means the third question triggers a warning; another off-topic question within that window can pause answers. Greetings, complaints, and questions missing from the knowledge base do not count. Zero disables off-topic warnings and pauses.',
+  windowMinutes: 'How long to count off-topic questions, starting with the first one. For example, with 10, the warning threshold must be reached within ten minutes. After that period, counting starts again with the next off-topic question. Zero disables off-topic warnings and pauses.',
+  pauseMinutes: 'How long to pause answers when off-topic questions continue after a warning. For example, 15 pauses answers for fifteen minutes. Messages during the pause do not extend it. Zero disables the first pause.',
+  repeatHours: 'How long to pause answers for repeated abuse after an earlier pause. For example, 6 means six hours. The visitor must again reach the warning threshold and continue off topic within the repeat detection period. Zero disables the repeated-abuse pause.',
+  repeatWindowHours: 'How long after a pause ends a new abuse episode counts as repeated. For example, 24 means another episode within the next day uses the repeated-abuse pause; later episodes use the first pause again. Zero turns off repeat detection.',
+  notifications: 'Whether the manager notifies you when visitors receive a repeated-abuse pause. Enter 1 to receive notifications or 0 to turn them off. Initial warnings and first pauses do not send owner notifications. Notifications let you open the restriction list and unblock visitors.',
+  noticeMinutes: 'How often to send further notifications about repeated-abuse pauses in this bot. The first notification is sent as soon as possible; later events are grouped into a count. For example, 15 sends at most one notification every fifteen minutes while new events occur. Zero uses the server minimum of one minute; to turn notifications off, change Owner notifications to 0.',
+};
 export type Protection = Record<ProtectionKey, number>;
 export function protectionSettings(stored: Partial<Protection> = {}): Protection {
   return Object.fromEntries(Object.entries(protectionFields).map(([key, field]) => {
