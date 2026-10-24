@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import { httpAdmission, serverLimits } from '../src/server-limits.ts';
+import { webhookDelivery } from '../src/telegram/webhook-delivery.ts';
 
 function response() {
   const value = new EventEmitter();
@@ -10,6 +11,16 @@ function response() {
   value.json = body => { value.body = body; return value; };
   return value;
 }
+
+test('webhook delivery bounds Telegram concurrency and resolves temporary tunnel addresses', async () => {
+  let calls = 0;
+  const resolve = async host => { calls++; assert.equal(host, 'new.trycloudflare.com'); return ['104.16.230.132']; };
+  assert.deepEqual(await webhookDelivery('https://example.com', resolve), { max_connections: 2 });
+  assert.equal(calls, 0);
+  assert.deepEqual(await webhookDelivery('https://new.trycloudflare.com', resolve), { max_connections: 2, ip_address: '104.16.230.132' });
+  assert.equal(calls, 1);
+  assert.deepEqual(await webhookDelivery('https://new.trycloudflare.com', async () => { throw new Error('DNS unavailable'); }), { max_connections: 2 });
+});
 
 test('HTTP admission bounds active handlers and releases each slot exactly once', () => {
   const gate = httpAdmission();

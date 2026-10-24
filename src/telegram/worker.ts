@@ -4,6 +4,7 @@ import { QueryError } from '../queries/errors.js';
 import { TelegramError, decryptToken } from './client.js';
 import type { TelegramService, Update } from './service.js';
 import { protectionSettings } from './protection.js';
+import { webhookDelivery } from './webhook-delivery.js';
 
 export async function processUpdate(service: TelegramService, db: PoolClient) {
   await db.query('BEGIN');
@@ -144,9 +145,11 @@ export async function cleanupTelegram(db: PoolClient) {
 
 // Register the current public URL for every bot, including paused ones.
 export async function refreshWebhooks(service: TelegramService, db: PoolClient) {
+  const delivery = await webhookDelivery(service.config.publicUrl);
   await service.api.call(service.config.token, 'setWebhook', {
     url: `${service.config.publicUrl}/telegram/webhook/${service.config.managerId}`,
     secret_token: service.config.webhookSecret, allowed_updates: ['message', 'callback_query', 'managed_bot'],
+    ...delivery,
   });
   const bots = await db.query<{ id: string; token_ciphertext: string; webhook_secret: string }>(
     'SELECT id, token_ciphertext, webhook_secret FROM telegram_bots ORDER BY id',
@@ -155,7 +158,7 @@ export async function refreshWebhooks(service: TelegramService, db: PoolClient) 
     try {
       await service.api.call(decryptToken(bot.token_ciphertext, service.config.encryptionKey), 'setWebhook', {
         url: `${service.config.publicUrl}/telegram/webhook/${bot.id}`,
-        secret_token: bot.webhook_secret, allowed_updates: ['message'],
+        secret_token: bot.webhook_secret, allowed_updates: ['message'], ...delivery,
       });
     } catch (error) {
       if (!(error instanceof TelegramError) || ![401, 403, 404].includes(error.code)) throw error;

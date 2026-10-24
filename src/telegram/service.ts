@@ -3,6 +3,7 @@ import { translator, type Language } from './i18n.js';
 import { startTyping } from './typing.js';
 import { protectionFields, protectionSettings, visitorAdmission, ownerAdmission, recordOffTopic, type ProtectionKey } from './protection.js';
 import { serverLimits } from '../server-limits.js';
+import { webhookDelivery } from './webhook-delivery.js';
 import { managerHelp, managerIntroduction, type HelpTopic } from './guide.js';
 import { randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
@@ -508,7 +509,7 @@ export class TelegramService {
     const me = await this.api.call<User>(token, 'getMe');
     if (me.id !== event.bot.id) throw new Error('Managed bot identity mismatch.');
     const secret = existing?.webhook_secret ?? randomBytes(32).toString('base64url');
-    await this.api.call(token, 'setWebhook', { url: `${this.config.publicUrl}/telegram/webhook/${id}`, secret_token: secret, allowed_updates: ['message'] });
+    await this.api.call(token, 'setWebhook', { url: `${this.config.publicUrl}/telegram/webhook/${id}`, secret_token: secret, allowed_updates: ['message'], ...await webhookDelivery(this.config.publicUrl) });
     if (!sameOwner) {
       await this.api.call(this.config.token, 'setManagedBotAccessSettings', { user_id: event.bot.id, is_access_restricted: !enabled });
       // Do not deliver queued answers from a previous owner's knowledge base.
