@@ -185,11 +185,11 @@ Retrieval ranks the closest eight chunks by cosine similarity without a similari
 
 The complete serialized context fits within a 3000-token budget measured with `cl100k_base`. This is a budgeting convention, not the answering model's exact token count. Expansion can displace lower-ranked matches, so its quality must be evaluated on representative questions. If no context is available, the API declines without a generation call. Otherwise, the model assesses whether the passages support an answer and can redirect or decline. Similarity determines ranking, not whether a chunk is allowed into the prompt. `RETRIEVAL_MIN_SIMILARITY` is no longer used.
 
-Platform instructions are fixed; free-form bot preferences, questions, and source text are serialized as lower-trust input data. A separate model request classifies the question without owner preferences or the generated reply. After generation, the server rejects missing/invented citation IDs and recognized links absent from the cited evidence, then uses another independent request to review factual support. A negative review or blocked link returns `insufficient_context`; checker failure fails closed with a sanitized error. Only the independent classification can supply an `off_topic` moderation signal, including when a factual answer was withheld. Structured output, citations, and model-based review do not prove correctness or eliminate prompt injection. See [the defense boundaries and evaluation procedure](docs/security/prompt-injection.md).
+Platform instructions are fixed; free-form bot preferences, questions, and source text are serialized as lower-trust input data. The server checks citation IDs and recognized links against the cited evidence. Unknown links are withheld with `insufficient_context`. These deterministic checks do not prove factual support or eliminate prompt injection. See [the defense boundaries](docs/security/prompt-injection.md).
 
-A normal successful question makes three model calls (classification, generation, review), plus its query embedding. Safety calls use at most 64 output tokens each; generation keeps its 768-token cap. This increases latency and provider cost compared with a single generation call. Empty context and early rejections skip later stages. All calls use the same owner credentials and have response storage disabled.
+A normal successful question makes **one generation call**, plus its existing query embedding. The generator also returns the topic label in this call; only validated off-topic redirections can drive moderation. Additional model-based classification and evidence review are disabled in normal application/provider wiring to avoid their latency and cost. Their experimental adapter is retained for future evaluation; see [the specialized verification plan](docs/plans/specialized-answer-verification.md). Model response storage remains disabled.
 
-At most three queries run concurrently across all knowledge bases in one application process. Additional queries receive `429` immediately, without waiting. A single 30-second deadline covers admitted query processing, including token validation, ownership lookup, embedding, retrieval, classification, generation, and evidence review. Timeout returns `504`, attempts cancellation, and releases the query slot. Client disconnection also attempts cancellation. No provider requests are automatically retried.
+At most three queries run concurrently across all knowledge bases in one application process. Additional queries receive `429` immediately, without waiting. A single 30-second deadline covers admitted query processing, including token validation, ownership lookup, embedding, retrieval, and generation. Timeout returns `504`, attempts cancellation, and releases the query slot. Client disconnection also attempts cancellation. No provider requests are automatically retried.
 
 Operations still running after cancellation remain counted until they settle. A separate cap of six outstanding downstream operations prevents repeated timed-out requests from accumulating unlimited work; it can also cause `429` while fewer than three queries are active. Native provider transports have finite timeouts, and the configured production database pool bounds connection waits and SQL execution. Cancellation cannot guarantee that provider-side execution or charges stop.
 
@@ -364,9 +364,9 @@ an assurance of better answers. Answer detail remains subject to the existing
 **Test bot** runs a question through the normal answering pipeline using either the
 published settings or the draft. It uses the owner's OpenAI key and test quota,
 without customer delivery or visitor penalties. Results show the outcome, settings
-revision, elapsed processing time, classifier/evidence-review status, selected source
+revision, elapsed processing time, topic and optional evidence-review status, selected source
 context, and the assembled generation request without transport headers. The request
-view does not include the separate classifier and reviewer payloads. Changing settings requires reselecting a test
+view shows the single generation payload. Extra model review is marked disabled. Changing settings requires reselecting a test
 version. Every question captures the ready knowledge-base version at execution time;
 this is not a fixed-version comparison experiment.
 
@@ -376,8 +376,8 @@ expired content in bounded batches. Details explicitly opened in Telegram remain
 in that private conversation under Telegram's normal message retention. Production
 question history, analytics dashboards, Langfuse, and batch evaluation are outside
 this release. Failed test calls show a sanitized error code rather than provider
-response bodies; full context inspection currently requires a completed query. Model-based safety checks
-are probabilistic and can reject legitimate answers.
+response bodies; full context inspection currently requires a completed query. Additional model-based
+checks are currently disabled; factual support still requires semantic evaluation.
 
 Apply the new database migration before running this version. The additional focused
 settings checks run with:

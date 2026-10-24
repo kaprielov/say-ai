@@ -4,6 +4,7 @@ export type Language = 'en' | 'ru';
 
 // Keep manager copy available in every supported interface language.
 const russian: Record<string, string> = {
+  'Model review disabled': 'Проверка моделью отключена',
   'Safety checks: {topic}. Answer review: {review}.': 'Проверки: {topic}. Проверка ответа: {review}.',
   'Related question': 'Вопрос по теме', 'Social message': 'Общение',
   'Related question without evidence': 'Вопрос по теме без данных для ответа',

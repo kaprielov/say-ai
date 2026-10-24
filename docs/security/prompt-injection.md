@@ -1,5 +1,18 @@
 # Prompt-injection defenses
 
+Status update (2026-10-24): additional model classification and evidence review are
+**disabled in normal application/provider wiring** at the user's request. Runtime
+uses one generation call plus the existing query embedding. Fixed platform rules,
+lower-trust owner preferences, citation validation, and deterministic link checks
+remain active. Topic classification is again part of the generation response; only
+validated off-topic redirections can drive moderation. Independent semantic checking
+is deferred in [the specialized verification plan](../plans/specialized-answer-verification.md).
+
+The sections describing separate classifier/reviewer requests below document the
+retained experimental implementation, not the active production configuration.
+It can be exercised through explicit dependency injection in tests; it is not
+automatically enabled by account keys, bot settings, or an environment flag.
+
 ## Scope and trust boundaries
 
 The answering pipeline treats visitor questions, retrieved documents, generated
@@ -15,13 +28,13 @@ Free-form instructions remain limited to presentation and audience. They cannot
 change the server's output schema or select the security checker's instructions.
 Separating roles and data reduces exposure; it is not an absolute model-level boundary.
 
-## Query sequence
+## Experimental query sequence (disabled by default)
 
 1. Capture the owned active knowledge-base version and effective bot revision.
 2. Embed the question, retrieve/select bounded context, and decline empty retrieval.
 3. Classify the question using a dedicated request containing only the question and
    selected evidence. It receives neither owner preferences nor the generator's reply.
-4. Generate a candidate answer. Its schema does not contain a moderation topic.
+4. Generate a candidate answer. Ignore its proposed topic when an independent checker is explicitly enabled.
 5. Validate outcome, answer shape, and exact membership of cited chunk IDs. Withhold
    a factual answer to a question independently classified as off-topic.
 6. Check recognized URLs, bare domain links, and email addresses against the cited
@@ -38,11 +51,11 @@ Separating roles and data reduces exposure; it is not an absolute model-level bo
 A valid citation ID remains a format check, not proof of factual support. The
 separate evidence reviewer adds a probabilistic check; it is not a proof system.
 
-## Moderation
+## Experimental independent moderation (deferred)
 
 Only the independent classifier's `off_topic` label is exposed to the Telegram
 moderation path. It applies even when a candidate factual answer was withheld.
-The generator's topic field, if unexpectedly present, is ignored. Greetings,
+The generator's topic field is ignored in this experimental mode. Greetings,
 related complaints, missing information, and ambiguous follow-ups should not count
 as off-topic; the fixed classifier instructions explicitly describe those cases.
 Provider errors and aborted queries do not issue a moderation decision. Existing
@@ -51,7 +64,7 @@ never apply visitor penalties.
 
 ## Operational costs and diagnostics
 
-A normal successful question now makes three model requests: classification,
+When explicitly configured for an experiment, a successful question makes three model requests: classification,
 generation, and evidence review, plus the existing query embedding. The two safety
 requests have 64-output-token limits; generation retains its 768-token limit. Early
 exits can omit later stages. All stages share the existing 30-second deadline,
@@ -99,7 +112,7 @@ this policy checks provenance, not reputation. Information placed in retrievable
 bot documents should not be considered secret from that bot's visitors. No universal
 prompt-injection prevention or measured success rate is claimed.
 
-## Implementation validation (2026-10-24)
+## Historical validation before runtime disabling (2026-10-24)
 
 - `npm run build` passed.
 - The full deterministic suite with `RUN_LIVE_QUERY_TEST=false` and

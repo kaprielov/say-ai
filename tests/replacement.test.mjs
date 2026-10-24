@@ -37,7 +37,7 @@ before(async () => {
   });
   pool = new pg.Pool({ connectionString: databaseUrl.toString(), connectionTimeoutMillis: 3000 });
   const questions = new QuestionAnswering({
-    pool, limits: new QueryLimits(), safety: { classify: async () => 'related', review: async () => true }, embedder: () => fakeEmbedder(),
+    pool, limits: new QueryLimits(), embedder: () => fakeEmbedder(),
     answerer: { answer: async (_question, context) => ({ outcome: 'answered', answer: context[0].text, chunk_ids: [context[0].id] }) },
   });
   server = createApp({ pool, apiKey: key, ownerId, questions }).listen(0, '127.0.0.1');
@@ -195,7 +195,7 @@ test('an in-flight question keeps its captured version after a replacement activ
   let resume;
   const gate = new Promise(resolve => { resume = resolve; });
   const questions = new QuestionAnswering({
-    pool, limits: new QueryLimits(), safety: { classify: async () => 'related', review: async () => true },
+    pool, limits: new QueryLimits(),
     embedder: () => fakeEmbedder(async texts => {
       entered();
       await gate;

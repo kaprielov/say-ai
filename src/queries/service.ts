@@ -13,8 +13,8 @@ type QueryOptions = {
   pool: Pool;
   embedder: (model: string, dimensions: number) => Embedder;
   answerer: Answerer;
-  safety: AnswerSafety;
-  providers?: (owner: string, model: string, dimensions: number) => Promise<{ embedder: Embedder; answerer: Answerer; safety: AnswerSafety }>;
+  safety?: AnswerSafety;
+  providers?: (owner: string, model: string, dimensions: number) => Promise<{ embedder: Embedder; answerer: Answerer; safety?: AnswerSafety }>;
   deadlineMs?: number;
   limits?: QueryLimits;
 };
@@ -89,28 +89,33 @@ export class QuestionAnswering {
       const context = selectContext(matches.rows, neighbors.rows, selectedConfig);
       check();
       let topic: QuestionTopic = 'uncertain';
-      let review: 'not_generated' | 'not_required' | 'blocked_links' | 'rejected' | 'supported' = 'not_generated';
+      let review: 'disabled' | 'not_generated' | 'not_required' | 'blocked_links' | 'rejected' | 'supported' = 'not_generated';
       let result: ReturnType<QuestionAnswering['validateAnswer']> = refusal();
       if (context.length) {
-        if (!providers.safety?.classify || !providers.safety.review) throw new QueryError(503, 'safety_unavailable', 'Answer safety checks are not configured.');
-        topic = await call(() => providers.safety.classify(question, context, signal));
-        if (!topics.includes(topic)) throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
+        const checker = providers.safety;
+        if (checker) {
+          if (!checker.classify || !checker.review) throw new QueryError(503, 'safety_unavailable', 'Answer safety checks are not configured.');
+          topic = await call(() => checker.classify(question, context, signal));
+          if (!topics.includes(topic)) throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
+        }
         const generated = await call(() => providers.answerer.answer(question, context, signal, settings));
         const candidate = this.validateAnswer(generated, context);
-        review = 'not_required';
-        // The generator cannot turn an unrelated question into an unmoderated factual answer.
-        if (candidate.outcome !== 'insufficient_context' && !(topic === 'off_topic' && candidate.outcome === 'answered')) {
+        if (!checker) topic = topics.includes(generated.topic as QuestionTopic) ? generated.topic as QuestionTopic : 'uncertain';
+        review = checker ? 'not_required' : 'disabled';
+        // An explicitly enabled checker can withhold factual answers to independently classified off-topic questions.
+        if (candidate.outcome !== 'insufficient_context' && !(checker && topic === 'off_topic' && candidate.outcome === 'answered')) {
           const evidence = context.filter(chunk => generated.chunk_ids.includes(chunk.id));
           if (!hasOnlyEvidenceLinks(candidate.answer!, evidence)) review = 'blocked_links';
+          else if (!checker) result = candidate;
           else {
-            const supported = await call(() => providers.safety.review(question, evidence, generated, signal));
+            const supported = await call(() => checker.review(question, evidence, generated, signal));
             if (typeof supported !== 'boolean') throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
             review = supported ? 'supported' : 'rejected';
             if (supported) result = candidate;
           }
         }
       }
-      return { ...result, ...(topic === 'off_topic' ? { topic: 'off_topic' as const } : {}), ...(run?.inspect ? { debug: {
+      return { ...result, ...(topic === 'off_topic' && (providers.safety || result.outcome === 'redirected') ? { topic: 'off_topic' as const } : {}), ...(run?.inspect ? { debug: {
         revision: run.revision, contentVersion: version.version_id, context,
         request: context.length ? answerRequest(question, context, settings) : null,
         safety: { topic, review }, elapsedMs: Math.round(performance.now() - started),

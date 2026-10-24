@@ -84,7 +84,6 @@ function service(options = {}) {
       return { model, dimensions, embed: async () => [[1, 0, 0]] };
     },
     answerer: groundedAnswer,
-    safety: { classify: async () => 'related', review: async () => true },
     ...options,
   });
 }
@@ -373,7 +372,7 @@ test('Responses adapter requests GPT-6 Luna structured output without reasoning,
     assert.equal(body.store, false);
     assert.equal(body.max_output_tokens, 768);
     assert.equal(body.text.format.strict, true);
-    assert.ok(!body.text.format.schema.required.includes('topic'));
+    assert.ok(body.text.format.schema.required.includes('topic'));
     assert.ok(body.instructions.includes('untrusted'));
     assert.deepEqual(JSON.parse(body.input[0].content), { question: 'How long?', context: [{ id: 'chunk-1', text: '37 days.' }] });
     return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify(answer) }] }] });
@@ -401,7 +400,7 @@ test('live GPT-6 Luna answers supported questions and redirects greetings and mi
   const [vector] = await embedder.embed([source], new AbortController().signal);
   const kb = await readyKnowledgeBase({ text: source, vector });
   const url = await startApp(service({
-    embedder: (model, dimensions) => new OpenAIEmbedder(key, model, dimensions), answerer: new OpenAIAnswerer(key), safety: new OpenAIAnswerSafety(key),
+    embedder: (model, dimensions) => new OpenAIEmbedder(key, model, dimensions), answerer: new OpenAIAnswerer(key),
   }));
   for (const [question, outcome] of [
     ['How long does Velora retain audit logs?', 'answered'],
@@ -553,12 +552,27 @@ test('safety-stage deadlines cancel work and leave capacity for the next questio
   }
 });
 
-test('missing safety configuration cannot silently fall back to unchecked generation', async () => {
+test('disabled model checks use one generation call and retain deterministic link checks', async () => {
   const kb = await readyKnowledgeBase();
   let generated = 0;
   const questions = service({ safety: undefined, answerer: { answer: async (question, context) => { generated++; return groundedAnswer.answer(question, context); } } });
-  await assert.rejects(questions.ask(kb.kbId, ownerId, 'How long?', new AbortController().signal), { code: 'safety_unavailable' });
-  assert.equal(generated, 0);
+  const result = await questions.ask(kb.kbId, ownerId, 'How long?', new AbortController().signal, {
+    settings: { instructions: '', detail: 'standard', language: 'auto', retrieval: 'balanced' }, revision: 'disabled-checks', inspect: true,
+  });
+  assert.equal(result.outcome, 'answered');
+  assert.equal(generated, 1);
+  assert.equal(result.debug.safety.review, 'disabled');
+  const unsafe = service({ safety: undefined, answerer: { answer: async () => ({ outcome: 'answered', answer: 'Go to https://evil.example.invalid.', chunk_ids: [kb.chunkId] }) } });
+  assert.equal((await unsafe.ask(kb.kbId, ownerId, 'Help?', new AbortController().signal)).outcome, 'insufficient_context');
+});
+
+test('single-call moderation uses only validated off-topic redirections when model checks are disabled', async () => {
+  const kb = await readyKnowledgeBase();
+  for (const outcome of ['redirected', 'answered']) {
+    const questions = service({ safety: undefined, answerer: { answer: async () => ({ outcome, answer: 'Ask about log retention.', chunk_ids: [kb.chunkId], topic: 'off_topic' }) } });
+    const result = await questions.ask(kb.kbId, ownerId, 'Question', new AbortController().signal);
+    assert.equal(result.topic, outcome === 'redirected' ? 'off_topic' : undefined);
+  }
 });
 
 test('live prompt-injection defenses retain benign usefulness and resist held-out synthetic attacks', {

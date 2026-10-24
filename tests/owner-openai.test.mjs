@@ -145,8 +145,8 @@ test('indexing and answering use the base owner key rather than the global key o
   assert.equal(response.outcome, 'answered');
   assert.ok(requests.slice(before).length >= 3);
   assert.ok(requests.slice(before).every(request => request.key === `Bearer ${beta}`));
-  assert.ok(requests.slice(before).some(request => request.body.text?.format?.name === 'question_topic'));
-  assert.ok(requests.slice(before).some(request => request.body.text?.format?.name === 'answer_support'));
+  assert.equal(requests.slice(before).filter(request => request.target.endsWith('/responses')).length, 1);
+  assert.ok(!requests.slice(before).some(request => ['question_topic', 'answer_support'].includes(request.body.text?.format?.name)));
   await keys.remove('telegram:2');
   await assert.rejects(answers.ask(kb.id, 'telegram:2', 'When?', new AbortController().signal), { code: 'openai_key_required' });
 });
