@@ -1,3 +1,4 @@
+import { OpenAIAnswerSafety } from './queries/safety.js';
 import { createApp } from './app.js';
 import { config, readAuthConfig, readIngestionConfig, readQueryConfig, readTelegramConfig } from './config.js';
 import { pool } from './db.js';
@@ -19,6 +20,7 @@ const questions = queryConfig || ownerOpenAI ? new QuestionAnswering({
   pool,
   embedder: (model, dimensions) => new OpenAIEmbedder(queryConfig?.apiKey ?? '', model, dimensions),
   answerer: new OpenAIAnswerer(queryConfig?.apiKey ?? ''),
+  safety: new OpenAIAnswerSafety(queryConfig?.apiKey ?? ''),
   providers: ownerOpenAI ? (owner, model, dimensions) => ownerOpenAI.providers(owner, model, dimensions) : undefined,
 }) : undefined;
 const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions, ownerOpenAI) : undefined;

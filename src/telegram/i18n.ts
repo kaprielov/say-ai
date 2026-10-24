@@ -4,6 +4,15 @@ export type Language = 'en' | 'ru';
 
 // Keep manager copy available in every supported interface language.
 const russian: Record<string, string> = {
+  'Safety checks: {topic}. Answer review: {review}.': 'Проверки: {topic}. Проверка ответа: {review}.',
+  'Related question': 'Вопрос по теме', 'Social message': 'Общение',
+  'Related question without evidence': 'Вопрос по теме без данных для ответа',
+  'Unrelated question': 'Вопрос вне темы', 'Unclear question': 'Неясный вопрос',
+  'Not generated': 'Генерация не выполнялась', 'Not required': 'Не требовалась',
+  'Blocked by link policy': 'Заблокирован из-за ссылки',
+  'Not supported by evidence': 'Не подтверждён источниками',
+  'Passed evidence review': 'Прошёл проверку по источникам',
+
   'Discard all unpublished changes? Published answers will keep their current settings.': 'Сбросить все неопубликованные изменения? Настройки рабочих ответов сохранятся.',
   'Tune answers in Answer settings, test a draft, then publish it. You can also choose a knowledge base, pause answers, and adjust spam protection.': 'Измените настройки ответов, проверьте черновик и опубликуйте его. Также можно выбрать базу знаний, приостановить ответы и настроить защиту от спама.',
 

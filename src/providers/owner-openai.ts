@@ -1,3 +1,4 @@
+import { OpenAIAnswerSafety } from '../queries/safety.js';
 import { createHmac } from 'node:crypto';
 import type { Pool } from 'pg';
 import { QueryError } from '../queries/errors.js';
@@ -67,7 +68,7 @@ export class OwnerOpenAI implements OwnerCredentials {
       if (!this.defaultKey) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
       key = this.defaultKey;
     }
-    return { embedder: new OpenAIEmbedder(key, model, dimensions, request), answerer: new OpenAIAnswerer(key, request) };
+    return { embedder: new OpenAIEmbedder(key, model, dimensions, request), answerer: new OpenAIAnswerer(key, request), safety: new OpenAIAnswerSafety(key, request) };
   }
 
   async ingestionEmbedder(owner: string, model = this.model, dimensions = this.dimensions) {

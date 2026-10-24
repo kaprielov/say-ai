@@ -34,7 +34,7 @@ const api = {
 const questions = { async ask(kb, owner, question, _signal, run) {
   answers.push({ kb, owner, question });
   answerRuns.push(run);
-  return { outcome: 'answered', answer: 'The store opens at 9 AM.', sources: [], ...(run?.inspect ? { debug: { revision: run.revision, contentVersion: 'test-version', elapsedMs: 12, context: [{ id: 'test-chunk', text: 'The store opens at 9 AM.' }], request: { instructions: run.settings.instructions } } } : {}) };
+  return { outcome: 'answered', answer: 'The store opens at 9 AM.', sources: [], ...(run?.inspect ? { debug: { revision: run.revision, contentVersion: 'test-version', elapsedMs: 12, safety: { topic: 'related', review: 'supported' }, context: [{ id: 'test-chunk', text: 'The store opens at 9 AM.' }], request: { instructions: run.settings.instructions } } } : {}) };
 } };
 
 before(async () => {
@@ -801,4 +801,20 @@ test('owner bot settings support draft tests, publication, rollback, stale contr
   for (const payload of payloads) for (const row of payload.reply_markup?.inline_keyboard ?? []) for (const item of row) {
     if (item.callback_data) assert.ok(Buffer.byteLength(item.callback_data) <= 64);
   }
+});
+
+
+test('confirmed off-topic classification applies after a withheld answer but never to manager tests', async () => {
+  const kb = await protectionBot(94, 9401);
+  const original = service;
+  service = new TelegramService(pool, config, api, { async ask() {
+    return { outcome: 'insufficient_context', answer: null, sources: [], topic: 'off_topic' };
+  } });
+  try {
+    await deliver(message(9400, 'An unrelated visitor question'), '9401');
+    assert.equal((await pool.query('SELECT strikes FROM telegram_visitors WHERE bot_id=9401 AND user_id=9400')).rows[0].strikes, 1);
+    await deliver(callback(94, `test:${kb}`));
+    await deliver(message(94, 'An unrelated owner test question'));
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_visitors WHERE bot_id=9401 AND user_id=94')).rows[0].n, 0);
+  } finally { service = original; }
 });

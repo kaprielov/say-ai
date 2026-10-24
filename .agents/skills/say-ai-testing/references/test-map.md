@@ -21,7 +21,7 @@ run every listed suite for every edit in a directory.
 
 ## Current environment limitations
 
-- Only documents, server-limits, and dev-public test files currently run without a
+- Documents, server-limits, dev-public, and query-safety test files currently run without a
   database. Ingestion, queries, Telegram, and owner-key files mix pure checks with
   file-level database hooks. Filtering by name does not remove those hooks.
 - Most DB-backed suites create and migrate random temporary databases through
@@ -40,7 +40,7 @@ run every listed suite for every edit in a directory.
   RUN_LIVE_QUERY_TEST=false RUN_LIVE_EMBEDDING_TEST=false node --env-file-if-exists=.env --import tsx --test tests/*.test.mjs
   ```
 
-  Expect the two opt-in live cases to be skipped. Check the exit status and actual
+  Expect all opt-in live cases to be skipped. Check the exit status and actual
   summary; this command is guidance, not evidence that the current suite passes.
   Keep the live flags false for focused ingestion/query runs too, even if `.env`
   or the shell enables them. Do not run broad checks for copy/policy-only changes.

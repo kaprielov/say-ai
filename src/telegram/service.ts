@@ -28,9 +28,10 @@ export type Update = {
   callback_query?: { id: string; from: User; message?: Message; data?: string };
   managed_bot?: { user: User; bot: User };
 };
-type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null; tuning_bot_id?: string | null; tuning_version?: string | null; tuning_mode?: string | null; tuning_result?: { debug?: { revision: string; contentVersion: string; elapsedMs: number; context: {id: string; text: string}[]; request: unknown } } | null };
+type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null; tuning_bot_id?: string | null; tuning_version?: string | null; tuning_mode?: string | null; tuning_result?: { debug?: { revision: string; contentVersion: string; elapsedMs: number; safety?: { topic: string; review: string }; context: {id: string; text: string}[]; request: unknown } } | null };
 type Bot = { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean; protection: Record<string, number>; answer_settings: SettingsState };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const safetyLabels: Record<string, string> = { related: 'Related question', social: 'Social message', missing_information: 'Related question without evidence', off_topic: 'Unrelated question', uncertain: 'Unclear question', not_generated: 'Not generated', not_required: 'Not required', blocked_links: 'Blocked by link policy', rejected: 'Not supported by evidence', supported: 'Passed evidence review' };
 const settingLabels: Record<string, string> = { standard: 'Standard', concise: 'Concise', detailed: 'Detailed', auto: 'Match question language', ru: 'Russian', en: 'English', balanced: 'Balanced', focused: 'Focused', expanded: 'Expanded' };
 const ownerId = (id: number) => `telegram:${id}`;
 const buttons = (rows: [string, string][][]) => ({ inline_keyboard: rows.map(row => row.map(([text, callback_data]) => ({ text, callback_data }))) });
@@ -740,13 +741,18 @@ export class TelegramService {
       await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?'));
       if (run) {
         await db.query('UPDATE telegram_sessions SET tuning_result=$2, updated_at=now() WHERE user_id=$1', [chat, { debug: result.debug }]);
-        await this.enqueue(db, this.config.managerId, chat, t('Test result: {outcome}. Version: {revision}. Duration: {ms} ms. Details are kept until you leave testing, for up to 24 hours.', { outcome: t(result.outcome), revision: run.revision.slice(0, 8), ms: String(result.debug?.elapsedMs ?? 0) }), buttons([
+        let summary = t('Test result: {outcome}. Version: {revision}. Duration: {ms} ms. Details are kept until you leave testing, for up to 24 hours.', { outcome: t(result.outcome), revision: run.revision.slice(0, 8), ms: String(result.debug?.elapsedMs ?? 0) });
+        if (result.debug?.safety) summary += '\n' + t('Safety checks: {topic}. Answer review: {review}.', {
+          topic: t(safetyLabels[result.debug.safety.topic] ?? result.debug.safety.topic),
+          review: t(safetyLabels[result.debug.safety.review] ?? result.debug.safety.review),
+        });
+        await this.enqueue(db, this.config.managerId, chat, summary, buttons([
           ...(result.debug ? [[[t('Retrieved context'), `bv:${run.target}:c:0`], [t('Full model request'), `bv:${run.target}:p:0`]]] as [string,string][][] : []),
           [[t('Choose test version'), `bt:${run.target}`], [t('Answer settings'), `bs:${run.target}`]],
           [[t('Back'), `bot:${run.target}`], [t('Main menu'), 'menu']],
         ]));
       }
-      if (!testing && result.outcome === 'redirected' && 'topic' in result && result.topic === 'off_topic') {
+      if (!testing && result.topic === 'off_topic') {
         const action = await recordOffTopic(db, botId, chat, owner, settings);
         if (action) await this.enqueue(db, botId, chat, t(action.message, { minutes: String(action.minutes) }));
       }

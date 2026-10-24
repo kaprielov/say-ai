@@ -1,3 +1,4 @@
+import { hasOnlyEvidenceLinks, topics, type AnswerSafety, type QuestionTopic } from './safety.js';
 import { validateBotSettings, type BotAnswerSettings } from '../bots/settings.js';
 import { answerRequest } from './answerer.js';
 import type { Pool } from 'pg';
@@ -12,7 +13,8 @@ type QueryOptions = {
   pool: Pool;
   embedder: (model: string, dimensions: number) => Embedder;
   answerer: Answerer;
-  providers?: (owner: string, model: string, dimensions: number) => Promise<{ embedder: Embedder; answerer: Answerer }>;
+  safety: AnswerSafety;
+  providers?: (owner: string, model: string, dimensions: number) => Promise<{ embedder: Embedder; answerer: Answerer; safety: AnswerSafety }>;
   deadlineMs?: number;
   limits?: QueryLimits;
 };
@@ -26,7 +28,7 @@ export class QuestionAnswering {
     const started = performance.now();
     const settings = run ? validateBotSettings(run.settings) : undefined;
     const selectedConfig = retrievalProfiles[settings?.retrieval ?? 'balanced'] ?? contextConfig;
-    const { pool, embedder, answerer, deadlineMs = QUERY_DEADLINE_MS, limits = queryLimits } = this.options;
+    const { pool, embedder, answerer, safety, deadlineMs = QUERY_DEADLINE_MS, limits = queryLimits } = this.options;
     const release = limits.enter();
     const controller = new AbortController();
     const timeoutError = () => new QueryError(504, 'query_timeout', 'The query exceeded its deadline.');
@@ -67,7 +69,7 @@ export class QuestionAnswering {
       }
       const providers = this.options.providers
         ? await call(() => this.options.providers!(ownerId, version.embedding_model, version.embedding_dimensions))
-        : { embedder: embedder(version.embedding_model, version.embedding_dimensions), answerer };
+        : { embedder: embedder(version.embedding_model, version.embedding_dimensions), answerer, safety };
       const vectors = await call(() => providers.embedder.embed([question], signal));
       validateVectors(vectors, 1, version.embedding_dimensions);
       const matches = await call(() => pool.query<PositionedChunk>(`
@@ -86,13 +88,32 @@ export class QuestionAnswering {
       `, [version.version_id, id, positions])) : { rows: [] };
       const context = selectContext(matches.rows, neighbors.rows, selectedConfig);
       check();
-      const result = context.length
-        ? this.validateAnswer(await call(() => providers.answerer.answer(question, context, signal, settings)), context)
-        : refusal();
-      return { ...result, ...(run?.inspect ? { debug: {
+      let topic: QuestionTopic = 'uncertain';
+      let review: 'not_generated' | 'not_required' | 'blocked_links' | 'rejected' | 'supported' = 'not_generated';
+      let result: ReturnType<QuestionAnswering['validateAnswer']> = refusal();
+      if (context.length) {
+        if (!providers.safety?.classify || !providers.safety.review) throw new QueryError(503, 'safety_unavailable', 'Answer safety checks are not configured.');
+        topic = await call(() => providers.safety.classify(question, context, signal));
+        if (!topics.includes(topic)) throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
+        const generated = await call(() => providers.answerer.answer(question, context, signal, settings));
+        const candidate = this.validateAnswer(generated, context);
+        review = 'not_required';
+        // The generator cannot turn an unrelated question into an unmoderated factual answer.
+        if (candidate.outcome !== 'insufficient_context' && !(topic === 'off_topic' && candidate.outcome === 'answered')) {
+          const evidence = context.filter(chunk => generated.chunk_ids.includes(chunk.id));
+          if (!hasOnlyEvidenceLinks(candidate.answer!, evidence)) review = 'blocked_links';
+          else {
+            const supported = await call(() => providers.safety.review(question, evidence, generated, signal));
+            if (typeof supported !== 'boolean') throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
+            review = supported ? 'supported' : 'rejected';
+            if (supported) result = candidate;
+          }
+        }
+      }
+      return { ...result, ...(topic === 'off_topic' ? { topic: 'off_topic' as const } : {}), ...(run?.inspect ? { debug: {
         revision: run.revision, contentVersion: version.version_id, context,
         request: context.length ? answerRequest(question, context, settings) : null,
-        elapsedMs: Math.round(performance.now() - started),
+        safety: { topic, review }, elapsedMs: Math.round(performance.now() - started),
       } } : {}) };
     } catch (error) {
       check();
@@ -118,7 +139,6 @@ export class QuestionAnswering {
     }
     return {
       outcome: result.outcome as 'answered' | 'redirected', answer: result.answer,
-      ...(result.outcome === 'redirected' && result.topic === 'off_topic' ? { topic: 'off_topic' as const } : {}),
       sources: [...new Set(result.chunk_ids)].map(id => ({ chunk_id: id, text: context.find(chunk => chunk.id === id)!.text })),
     };
   }

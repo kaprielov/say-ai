@@ -31,6 +31,8 @@ const provider = async (target, options) => {
     return Response.json({ data: inputs.map((_input, index) => ({ index, embedding: [1, ...Array(body.dimensions - 1).fill(0)] })) });
   }
   if (body.input === 'Reply OK.') return Response.json({ status: 'completed', output: [] });
+  if (body.text?.format?.name === 'question_topic') return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify({ topic: 'related' }) }] }] });
+  if (body.text?.format?.name === 'answer_support') return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify({ supported: true }) }] }] });
   const input = JSON.parse(body.input[0].content);
   return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify({ outcome: 'answered', answer: 'The shop opens at 9 AM.', chunk_ids: [input.context[0].id] }) }] }] });
 };
@@ -143,6 +145,8 @@ test('indexing and answering use the base owner key rather than the global key o
   assert.equal(response.outcome, 'answered');
   assert.ok(requests.slice(before).length >= 3);
   assert.ok(requests.slice(before).every(request => request.key === `Bearer ${beta}`));
+  assert.ok(requests.slice(before).some(request => request.body.text?.format?.name === 'question_topic'));
+  assert.ok(requests.slice(before).some(request => request.body.text?.format?.name === 'answer_support'));
   await keys.remove('telegram:2');
   await assert.rejects(answers.ask(kb.id, 'telegram:2', 'When?', new AbortController().signal), { code: 'openai_key_required' });
 });
