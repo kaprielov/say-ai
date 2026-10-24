@@ -7,7 +7,6 @@ coverage/
 .env
 .env.*
 !.env.example
-/AGENTS.md
 
 # Runtime logs and evaluation results
 /logs/
