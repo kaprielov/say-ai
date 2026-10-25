@@ -43,7 +43,7 @@ export function telegramRouter(service: TelegramService) {
       if (!admitted.rows[0]) throw new QueryError(429, 'key_check_limit', 'Too many key checks. Try again in one minute.');
       const key = request.body?.key;
       if (typeof key !== 'string') throw new QueryError(400, 'invalid_openai_key', 'Enter a valid OpenAI API key.');
-      await service.credentials.validate(key);
+      await service.credentials.validate(key, owner);
       await service.credentials.save(owner, key);
       // Only the confirmation and menu enter the Telegram queue, never the credential.
       await transaction(service.pool, async db => {

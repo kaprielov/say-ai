@@ -23,7 +23,7 @@ const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 const config = { token: '100:manager', managerId: '100', webhookSecret: 'secret'.repeat(8), publicUrl: 'https://example.com', encryptionKey: randomBytes(32), dailyQueries: 2 };
 let pool, db, server, baseUrl, service, created = false;
 let sequence = 0;
-const calls = [], answers = [], answerRuns = [];
+const calls = [], answers = [], answerRuns = [], spendingRuns = [];
 const api = {
   async call(token, method, payload) {
     calls.push({ token, method, payload });
@@ -33,9 +33,10 @@ const api = {
   },
   async download() { return Buffer.from('The store opens at 9 AM.'); },
 };
-const questions = { async ask(kb, owner, question, _signal, run) {
+const questions = { async ask(kb, owner, question, _signal, run, spending) {
   answers.push({ kb, owner, question });
   answerRuns.push(run);
+  spendingRuns.push(spending);
   return { outcome: 'answered', answer: 'The store opens at 9 AM.', sources: [], ...(run?.inspect ? { debug: { revision: run.revision, contentVersion: 'test-version', elapsedMs: 12, safety: { topic: 'related', review: 'supported' }, context: [{ id: 'test-chunk', text: 'The store opens at 9 AM.' }], request: { instructions: run.settings.instructions } } } : {}) };
 } };
 
@@ -66,6 +67,47 @@ after(async () => {
 function message(user, text, extra = {}) {
   return { update_id: ++sequence, message: { from: { id: user }, chat: { id: user, type: 'private' }, text, ...extra } };
 }
+
+test('account settings expose spending without requiring a connected key', async () => {
+  await deliver(callback(999, 'settings'));
+  const panel = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id'='999' ORDER BY id DESC LIMIT 1")).rows[0].payload;
+  assert.ok(panel.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'spending:month:0'));
+});
+
+test('spending panels isolate owners, paginate bots, retain origin and distinguish unknown costs in both languages', async () => {
+  await pool.query("INSERT INTO telegram_sessions (user_id,language) VALUES (960,'en'),(961,'ru')");
+  for (let bot = 9600; bot < 9606; bot++) {
+    await pool.query("INSERT INTO provider_spending(owner_id,bot_id,purpose,endpoint,model,estimated_usd) VALUES ('telegram:960',$1,'answers','responses','gpt-6-luna',0.1)", [bot]);
+  }
+  await pool.query(`INSERT INTO provider_spending(owner_id,purpose,endpoint,model,estimated_usd) VALUES
+    ('telegram:960','testing','responses','gpt-6-luna',0.2),
+    ('telegram:960','ingestion','embeddings','text-embedding-3-small',NULL),
+    ('telegram:961','answers','responses','gpt-6-luna',999)`);
+  await pool.query("INSERT INTO provider_spending(owner_id,purpose,endpoint,model,estimated_usd,created_at) VALUES ('telegram:960','testing','responses','gpt-6-luna',20,now()-interval '40 days')");
+  const latest = async user => (await pool.query("SELECT method,payload FROM telegram_outbox WHERE payload->>'chat_id'=$1 ORDER BY id DESC LIMIT 1", [String(user)])).rows[0];
+  const clicked = callback(960, 'spending:week:0:menu');
+  clicked.callback_query.message.message_id = 960;
+  await deliver(clicked);
+  let panel = await latest(960);
+  assert.equal(panel.method, 'editMessageText');
+  assert.match(panel.payload.text, /Estimated total: \$0.8000 \+ unknown cost: 1 calls/);
+  assert.ok(!panel.payload.text.includes('999.0000'));
+  assert.ok(!panel.payload.text.includes('20.0000'));
+  assert.equal((panel.payload.text.match(/Bot 960\d:/g) ?? []).length, 5);
+  assert.ok(panel.payload.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'spending:week:1:menu'));
+  assert.equal(panel.payload.reply_markup.inline_keyboard.at(-1)[0].callback_data, 'menu');
+  await deliver(callback(960, 'spending:week:1:menu'));
+  panel = await latest(960);
+  assert.equal((panel.payload.text.match(/Bot 960\d:/g) ?? []).length, 1);
+  assert.ok(panel.payload.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'spending:week:0:menu'));
+  await deliver(callback(961, 'spending:today:0'));
+  panel = await latest(961);
+  assert.match(panel.payload.text, /Расходы через Say AI/);
+  assert.match(panel.payload.text, /\$999.0000/);
+  assert.equal(panel.payload.reply_markup.inline_keyboard.at(-1)[0].callback_data, 'settings');
+  await deliver(callback(960, 'spending:today:0:telegram:961'));
+  assert.match((await latest(960)).payload.text, /Choose a spending period/);
+});
 function callback(user, data) {
   return { update_id: ++sequence, callback_query: { id: `callback${sequence}`, from: { id: user }, data, message: { chat: { id: user, type: 'private' } } } };
 }
@@ -799,10 +841,12 @@ test('owner bot settings support draft tests, publication, rollback, stale contr
   assert.equal(current.published.settings.instructions, '');
   await deliver(message(93, 'When does the store open?'), target);
   assert.equal(answerRuns.at(-1).settings.instructions, '');
+  assert.deepEqual(spendingRuns.at(-1), { purpose: 'answers', botId: target });
   await deliver(callback(user, `bq:${target}:draft`));
   await deliver(message(user, 'When does the store open?'));
   assert.equal(answerRuns.at(-1).settings.instructions, current.draft.instructions);
   assert.equal(answerRuns.at(-1).inspect, true);
+  assert.deepEqual(spendingRuns.at(-1), { purpose: 'testing', botId: target });
   const quota = (await pool.query("SELECT queries,test_queries FROM telegram_usage WHERE owner_id='telegram:91' AND day=CURRENT_DATE")).rows[0];
   assert.deepEqual(quota, { queries: 1, test_queries: 1 });
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_visitors WHERE bot_id=$1 AND user_id=91', [target])).rows[0].n, 0);
@@ -958,13 +1002,16 @@ test('failed requests preserve prior memory, expired rows are removed, and reset
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8300')).rows[0].n, 0);
 });
 
-test('dialogue migration rolls back and reapplies on the disposable database', async () => {
+test('dialogue and spending migrations roll back and reapply on the disposable database', async () => {
   const url = new URL(process.env.DATABASE_URL);
   url.pathname = `/${databaseName}`;
   const run = (...args) => promisify(execFile)(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', ...args, '--no-verbose'], { env: { ...process.env, DATABASE_URL: url.toString() } });
-  await run('down', '2');
+  const rollbackCount = (await pool.query("SELECT count(*)::int AS count FROM pgmigrations WHERE id >= (SELECT id FROM pgmigrations WHERE name='1793232000000_dialogue_memory')")).rows[0].count;
+  await run('down', String(rollbackCount));
   assert.equal((await pool.query("SELECT to_regclass('telegram_dialogues') AS name")).rows[0].name, null);
+  assert.equal((await pool.query("SELECT to_regclass('provider_spending') AS name")).rows[0].name, null);
   await run('up');
+  assert.equal((await pool.query("SELECT to_regclass('provider_spending') AS name")).rows[0].name, 'provider_spending');
   assert.equal((await pool.query("SELECT memory_pairs,memory_idle_minutes FROM telegram_bots WHERE id=8300")).rows[0].memory_pairs, 5);
 });
 

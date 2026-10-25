@@ -1,6 +1,6 @@
 # Larger knowledge-base uploads and multiple Telegram files
 
-Status: implemented and locally validated in the isolated worktree; not merged or deployed.
+Status: implemented and validated; the user authorized integration of all work into master on 2026-10-25. Deployment is outside this merge.
 Approved by the user on 2026-10-25. Branch: `codex/knowledge-base-batch-upload`.
 Date: 2026-10-25.
 Baseline: `fe6dee6` in the dedicated `knowledge-base-batch-upload` worktree.
@@ -247,6 +247,11 @@ implementation and local deterministic validation in this worktree only.
 ### Remaining integration checks
 
 Real Telegram client rendering/download acceptance and real-provider throughput
-were not checked. The current checkout has uncommitted pilot/spending work absent
-from this HEAD-based worktree; reconcile that separately before merging. No merge
-or deployment is authorized by this implementation step.
+were not checked. Pilot/spending changes were preserved in commit `88e9913` and
+reconciled with the batch-upload commit `ce7f0e7` for the user-requested master
+integration. Translation and manager-routing conflicts preserve both features;
+the migration test dynamically rolls back all migrations through dialogue memory.
+The combined build and `git diff --check` passed. The full deterministic suite
+passed 182 tests with four opt-in live tests skipped (186 total, zero failures),
+using the isolated test database. No production migration, remote push, app restart,
+or deployment was performed as part of the merge.

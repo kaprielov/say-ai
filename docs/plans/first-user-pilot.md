@@ -1,6 +1,7 @@
 # First-user pilot readiness plan
 
-Status: preparation checklist; pilot launch is pending the checks below.
+Status: preparation checklist; answer-quality evaluation is assigned to the first
+tester, with the other launch checks tracked below.
 Created: 2026-10-24.
 
 ## Decision and scope
@@ -38,6 +39,13 @@ as defects so successful onboarding does not hide usability problems.
 
 ### 1. Verify current answer quality and moderation
 
+Decision on 2026-10-25: the user assigned this evaluation to the first tester and
+deferred agent preparation/execution of the proposed 20–30-question evaluation.
+It is no longer a prerequisite for inviting that tester. The checklist below is
+retained as guidance for collecting pilot evidence, not as completed validation
+or a requirement to prepare the full question set before the first session.
+Current semantic quality and moderation accuracy remain unverified.
+
 - [ ] Prepare 20–30 new questions using representative documents from prospective
   pilot owners. Keep these separate from the existing tuning questions.
 - [ ] Write expected facts and supporting passages before running the questions.
@@ -57,7 +65,7 @@ as defects so successful onboarding does not hide usability problems.
   rerun affected cases. Preserve any remaining limitations in the pilot notes.
 
 Completion evidence: a dated review of the current implementation on new questions,
-with unresolved issues explicitly accepted or fixed before invitation. Valid JSON
+with unresolved issues recorded and prioritized during the pilot. Valid JSON
 and valid citation IDs alone are not evidence of factual support.
 
 ### 2. Verify the full path in real Telegram
@@ -208,6 +216,7 @@ mark planned or historical checks as newly completed.
 | 2026-10-24 | Local build, DB check, deterministic suite | Build and DB check passed; 125 passed, 0 failed, 2 skipped | Real Telegram, current semantic quality, concurrency, and remote deployment remain unverified |
 | 2026-10-25 | Initial operator snapshot, `scripts/pilot-status.mjs` | Three focused checks passed in a disposable DB; local `npm run pilot:status` succeeded; build passed; final full suite: 139 passed, 0 failed, 3 live cases skipped (142 total) | Lock presence is not progress; due age is not arrival age; runtime error/timing diagnostics and live checks remain open |
 | 2026-10-25 | Worker progress and suspected-stall detection | Controlled ingestion stall retained its lock while `/health` returned 200; status detected the stall and a replacement worker restored fresh progress. Migration down/up preserved queued work in a disposable DB. Build passed; full suite: 142 passed, 0 failed, 3 live cases skipped (145 total) | Five-minute detection threshold; no automatic restart or notifications; original arrival age and runtime error/timing diagnostics remain open |
+| 2026-10-25 | Evaluation ownership decision | User assigned answer-quality testing to the first tester; agent preparation and execution deferred | No new quality evidence; checklist retained for the pilot |
 
 The 2026-10-25 full-suite runs initially exposed a pre-existing clock-dependent
 Telegram assertion: the database clock was about 48 ms ahead of Node, making a

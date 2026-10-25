@@ -17,6 +17,8 @@ My bots — open a bot to see its link, choose its knowledge base, pause and ena
 
 Settings → Owner limits — optional daily quotas for customer questions and tests, counted separately. Both default to no daily quota.
 
+Spending — estimated USD spending through Say AI for today, the last 7 days, or this month. View bot answers by bot; testing, document processing, and key verification are shown separately. Calendar periods use UTC. Earlier spending and usage in other apps are not included. Unknown costs are marked; verify final charges in OpenAI billing. Also available in Settings, including without a connected key.
+
 Settings → OpenAI key — securely connect, replace, or remove the key used for all your knowledge bases and bots. Document processing and answers use your OpenAI API account and billing. Never paste a key into this chat.
 
 Settings → Language — change the interface language.
@@ -93,6 +95,8 @@ export const russianManagerHelp: Record<HelpTopic, string> = {
 Мои боты — откройте бота, чтобы получить ссылку, выбрать базу знаний, приостановить или включить ответы, настроить защиту от спама. В защите настраиваются квоты посетителей, повторы, предупреждения, сроки пауз и уведомления владельцу. Там же можно снять ограничение с посетителя. Технические ограничения сервера действуют всегда.
 
 Настройки → Лимиты владельца — необязательные дневные квоты для вопросов клиентов и тестов, которые считаются отдельно. По умолчанию обе квоты отключены.
+
+Расходы — оценка расходов через Say AI в долларах за сегодня, последние 7 дней или текущий месяц. Ответы показаны по ботам; тестирование, обработка документов и проверка ключа — отдельно. Календарные периоды считаются по UTC. Прежние расходы и другие приложения не учитываются. Неизвестные расходы отмечены; итоговые списания смотрите в биллинге OpenAI. Раздел также доступен в настройках, в том числе без подключённого ключа.
 
 Ключ OpenAI — подключите, замените или удалите ключ для всех ваших баз знаний и ботов через защищённую форму. Обработка документов и ответы расходуют средства вашего API-аккаунта OpenAI. Не отправляйте ключ в чат.
 
