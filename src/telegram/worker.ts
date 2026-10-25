@@ -144,6 +144,8 @@ export async function notifySecurity(service: TelegramService, db: PoolClient) {
 }
 
 export async function cleanupTelegram(db: PoolClient) {
+  await db.query(`DELETE FROM telegram_dialogues WHERE (bot_id,user_id,scope) IN
+    (SELECT d.bot_id,d.user_id,d.scope FROM telegram_dialogues d WHERE d.expires_at<=now() LIMIT 2000)`);
   await db.query(`UPDATE telegram_sessions SET tuning_result=NULL WHERE user_id IN (SELECT user_id FROM telegram_sessions WHERE tuning_result IS NOT NULL AND updated_at<now()-interval '1 day' LIMIT 2000)`);
   // Bounded batches avoid long cleanup transactions. Telegram retries last at most 24 hours.
   await db.query(`DELETE FROM telegram_updates WHERE id IN (SELECT id FROM telegram_updates

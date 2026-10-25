@@ -826,3 +826,120 @@ test('confirmed off-topic classification applies after a withheld answer but nev
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_visitors WHERE bot_id=9401 AND user_id=94')).rows[0].n, 0);
   } finally { service = original; }
 });
+
+test('dialogue memory isolates visitors, bots and manager tests; bounded pairs expire and reset', async () => {
+  const owner = 810, visitor = 811;
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (810,'en')");
+  const kb = await makeBase(owner, 'Dialogue memory');
+  await ready(kb);
+  await managed(owner, 8100);
+  await managed(owner, 8101);
+  await pool.query(`UPDATE telegram_bots SET enabled=true,knowledge_base_id=$1,
+    protection='{"perMinute":30,"perDay":0,"duplicateSeconds":0}',memory_pairs=2 WHERE id IN (8100,8101)`, [kb]);
+  await pool.query('INSERT INTO telegram_owner_limits(owner_id,daily,testing) VALUES ($1,0,0) ON CONFLICT(owner_id) DO UPDATE SET daily=0,testing=0', [`telegram:${owner}`]);
+  const latest = () => answerRuns.at(-1)?.history;
+  await deliver(message(visitor, 'Delivery options?'), '8100');
+  assert.deepEqual(latest(), []);
+  await deliver(message(visitor, 'And pickup?'), '8100');
+  assert.deepEqual(latest().map(p => p.question), ['Delivery options?']);
+  await deliver(message(visitor, 'How much?'), '8100');
+  assert.equal(latest().length, 2);
+  let row = (await pool.query("SELECT * FROM telegram_dialogues WHERE bot_id=8100 AND user_id=$1 AND scope='visitor'", [visitor])).rows[0];
+  assert.deepEqual(row.pairs.map(p => p.question), ['And pickup?', 'How much?']);
+  await deliver(message(812, 'Other visitor'), '8100');
+  assert.deepEqual(latest(), []);
+  await deliver(message(visitor, 'Other bot'), '8101');
+  assert.deepEqual(latest(), []);
+  await deliver(callback(owner, 'bq:8100:published'));
+  await deliver(message(owner, 'Manager test'));
+  assert.deepEqual(latest(), []);
+  await deliver(message(owner, 'Manager follow-up'));
+  assert.equal(latest()[0].question, 'Manager test');
+  await deliver(message(owner, '/reset'));
+  await deliver(message(owner, 'Fresh manager test'));
+  assert.deepEqual(latest(), []);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8100 AND scope='visitor'")).rows[0].n, 2);
+  const callsBeforeReset = answers.length;
+  await deliver(message(visitor, '/reset@store8100bot'), '8100');
+  assert.equal(answers.length, callsBeforeReset);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8100 AND user_id=$1', [visitor])).rows[0].n, 0);
+  await deliver(message(visitor, 'Fresh visitor question'), '8100');
+  assert.deepEqual(latest(), []);
+  await pool.query("UPDATE telegram_dialogues SET expires_at=now()-interval '1 second' WHERE bot_id=8100 AND user_id=$1", [visitor]);
+  await deliver(message(visitor, 'After expiry'), '8100');
+  assert.deepEqual(latest(), []);
+  await pool.query("UPDATE telegram_bots SET answer_settings=jsonb_set(answer_settings,'{published,id}',to_jsonb(gen_random_uuid()::text)) WHERE id=8100");
+  await deliver(message(visitor, 'After publication'), '8100');
+  assert.deepEqual(latest(), []);
+  await deliver(callback(owner, 'mp:8100:0'));
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8100')).rows[0].n, 0);
+  await deliver(message(visitor, 'Disabled question'), '8100');
+  await deliver(message(visitor, 'Disabled follow-up'), '8100');
+  assert.deepEqual(latest(), []);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8100')).rows[0].n, 0);
+});
+
+test('memory controls enforce ownership, validate custom values, preserve help and confirm clearing', async () => {
+  const user = 820;
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (820,'en')");
+  await managed(user, 8200);
+  await deliver(callback(user, 'memory:8200'));
+  let reply = await lastReply(user);
+  assert.ok(reply.reply_markup.inline_keyboard.flat().some(b => b.callback_data === 'mn:8200'));
+  assert.ok(reply.reply_markup.inline_keyboard.flat().every(b => Buffer.byteLength(b.callback_data) <= 64));
+  await assert.rejects(service.memoryAction(db, 821, 'mcc:8200'), { code: 'not_found' });
+  await deliver(callback(user, 'me:8200:pairs'));
+  await deliver(message(user, '21'));
+  assert.equal((await pool.query('SELECT memory_pairs FROM telegram_bots WHERE id=8200')).rows[0].memory_pairs, 5);
+  await deliver(message(user, '/help'));
+  await deliver(callback(user, 'continue'));
+  assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id=$1', [user])).rows[0].state, 'memory_value');
+  await deliver(message(user, '7'));
+  assert.equal((await pool.query('SELECT memory_pairs FROM telegram_bots WHERE id=8200')).rows[0].memory_pairs, 7);
+  await deliver(callback(user, 'me:8200:idle'));
+  await deliver(message(user, '4'));
+  assert.equal((await pool.query('SELECT memory_idle_minutes FROM telegram_bots WHERE id=8200')).rows[0].memory_idle_minutes, 60);
+  await deliver(message(user, '120'));
+  assert.equal((await pool.query('SELECT memory_idle_minutes FROM telegram_bots WHERE id=8200')).rows[0].memory_idle_minutes, 120);
+  await pool.query("INSERT INTO telegram_dialogues VALUES (8200,821,'visitor','test','[]',now()+interval '1 hour')");
+  await deliver(callback(user, 'mc:8200'));
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8200')).rows[0].n, 1);
+  reply = await lastReply(user);
+  assert.ok(reply.reply_markup.inline_keyboard.flat().some(b => b.callback_data === 'mcc:8200'));
+  await deliver(callback(user, 'mcc:8200'));
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8200')).rows[0].n, 0);
+});
+
+test('failed requests preserve prior memory, expired rows are removed, and reset works while paused', async () => {
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (830,'en')");
+  const kb = await makeBase(830, 'Memory failures');
+  await ready(kb);
+  await managed(830, 8300);
+  await pool.query('UPDATE telegram_bots SET enabled=true,knowledge_base_id=$1 WHERE id=8300', [kb]);
+  await deliver(message(831, 'Original question'), '8300');
+  const before = (await pool.query('SELECT * FROM telegram_dialogues WHERE bot_id=8300')).rows[0];
+  const failing = new TelegramService(pool, config, api, { ask: async () => { throw new Error('Provider failure'); } });
+  await db.query('BEGIN');
+  try { await failing.handle(db, '8300', message(831, 'A failed follow-up')); await db.query('COMMIT'); }
+  catch (error) { await db.query('ROLLBACK'); throw error; }
+  assert.deepEqual((await pool.query('SELECT * FROM telegram_dialogues WHERE bot_id=8300')).rows[0], before);
+  await pool.query('UPDATE telegram_bots SET enabled=false WHERE id=8300');
+  const paid = answers.length;
+  await deliver(message(831, '/reset'), '8300');
+  assert.equal(answers.length, paid);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8300')).rows[0].n, 0);
+  assert.equal((await pool.query('SELECT last_hash FROM telegram_visitors WHERE bot_id=8300 AND user_id=831')).rows[0].last_hash, null);
+  await pool.query("INSERT INTO telegram_dialogues VALUES (8300,831,'visitor','test','[]',now()-interval '1 second')");
+  await cleanupTelegram(db);
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM telegram_dialogues WHERE bot_id=8300')).rows[0].n, 0);
+});
+
+test('dialogue migration rolls back and reapplies on the disposable database', async () => {
+  const url = new URL(process.env.DATABASE_URL);
+  url.pathname = `/${databaseName}`;
+  const run = (...args) => promisify(execFile)(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', ...args, '--no-verbose'], { env: { ...process.env, DATABASE_URL: url.toString() } });
+  await run('down', '1');
+  assert.equal((await pool.query("SELECT to_regclass('telegram_dialogues') AS name")).rows[0].name, null);
+  await run('up');
+  assert.equal((await pool.query("SELECT memory_pairs,memory_idle_minutes FROM telegram_bots WHERE id=8300")).rows[0].memory_pairs, 5);
+});

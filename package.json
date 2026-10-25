@@ -17,7 +17,7 @@
     "test:api": "node --env-file-if-exists=.env --import tsx --test tests/api.test.mjs",
     "test:documents": "node --import tsx --test tests/documents.test.mjs",
     "test:ingestion": "node --env-file-if-exists=.env --import tsx --test tests/ingestion.test.mjs",
-    "test:queries": "node --env-file-if-exists=.env --import tsx --test tests/queries.test.mjs",
+    "test:queries": "node --env-file-if-exists=.env --import tsx --test tests/queries.test.mjs tests/conversation.test.mjs",
     "test:replacement": "node --env-file-if-exists=.env --import tsx --test tests/replacement.test.mjs",
     "test:telegram": "node --env-file-if-exists=.env --import tsx --test tests/telegram.test.mjs",
     "test:server-limits": "node --import tsx --test tests/server-limits.test.mjs",

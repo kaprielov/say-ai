@@ -4,7 +4,7 @@ import { answerRequest } from './answerer.js';
 import type { Pool } from 'pg';
 import { countTokens } from '../ingestion/chunking.js';
 import { validateVectors, type Embedder } from '../ingestion/embeddings.js';
-import type { Answerer, ContextChunk, GeneratedAnswer } from './answerer.js';
+import type { Answerer, ContextChunk, GeneratedAnswer, DialoguePair } from './answerer.js';
 import { QueryError } from './errors.js';
 import { QUERY_DEADLINE_MS, queryLimits, type QueryLimits } from './limits.js';
 import { contextConfig, retrievalProfiles, selectContext, type PositionedChunk } from './context.js';
@@ -24,7 +24,7 @@ const refusal = () => ({ outcome: 'insufficient_context' as const, answer: null,
 export class QuestionAnswering {
   constructor(private readonly options: QueryOptions) {}
 
-  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean }) {
+  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean; history?: DialoguePair[]; historyVersion?: string }) {
     const started = performance.now();
     const settings = run ? validateBotSettings(run.settings) : undefined;
     const selectedConfig = retrievalProfiles[settings?.retrieval ?? 'balanced'] ?? contextConfig;
@@ -70,7 +70,17 @@ export class QuestionAnswering {
       const providers = this.options.providers
         ? await call(() => this.options.providers!(ownerId, version.embedding_model, version.embedding_dimensions))
         : { embedder: embedder(version.embedding_model, version.embedding_dimensions), answerer, safety };
-      const vectors = await call(() => providers.embedder.embed([question], signal));
+      const history = run?.historyVersion && run.historyVersion !== version.version_id ? [] : run?.history ?? [];
+      if (history.length > 20 || countTokens(JSON.stringify(history)) > 6000) {
+        throw new QueryError(400, 'invalid_history', 'Dialogue history exceeds the context limit.');
+      }
+      const resolvedQuestion = history.length
+        ? await call(() => {
+          if (!providers.answerer.resolveQuestion) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
+          return providers.answerer.resolveQuestion(question, history, signal);
+        }) : question;
+      if (countTokens(resolvedQuestion) > 1024) throw new QueryError(400, 'question_too_long', 'question must not exceed 4096 characters or 1024 tokens.');
+      const vectors = await call(() => providers.embedder.embed([resolvedQuestion], signal));
       validateVectors(vectors, 1, version.embedding_dimensions);
       const matches = await call(() => pool.query<PositionedChunk>(`
         SELECT c.id, c.text, c.position
@@ -95,10 +105,10 @@ export class QuestionAnswering {
         const checker = providers.safety;
         if (checker) {
           if (!checker.classify || !checker.review) throw new QueryError(503, 'safety_unavailable', 'Answer safety checks are not configured.');
-          topic = await call(() => checker.classify(question, context, signal));
+          topic = await call(() => checker.classify(resolvedQuestion, context, signal));
           if (!topics.includes(topic)) throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
         }
-        const generated = await call(() => providers.answerer.answer(question, context, signal, settings));
+        const generated = await call(() => providers.answerer.answer(question, context, signal, settings, history));
         const candidate = this.validateAnswer(generated, context);
         if (!checker) topic = topics.includes(generated.topic as QuestionTopic) ? generated.topic as QuestionTopic : 'uncertain';
         review = checker ? 'not_required' : 'disabled';
@@ -108,7 +118,7 @@ export class QuestionAnswering {
           if (!hasOnlyEvidenceLinks(candidate.answer!, evidence)) review = 'blocked_links';
           else if (!checker) result = candidate;
           else {
-            const supported = await call(() => checker.review(question, evidence, generated, signal));
+            const supported = await call(() => checker.review(resolvedQuestion, evidence, generated, signal));
             if (typeof supported !== 'boolean') throw new QueryError(502, 'safety_check_failed', 'The answer safety check could not be completed.');
             review = supported ? 'supported' : 'rejected';
             if (supported) result = candidate;
@@ -116,8 +126,8 @@ export class QuestionAnswering {
         }
       }
       return { ...result, ...(topic === 'off_topic' && (providers.safety || result.outcome === 'redirected') ? { topic: 'off_topic' as const } : {}), ...(run?.inspect ? { debug: {
-        revision: run.revision, contentVersion: version.version_id, context,
-        request: context.length ? answerRequest(question, context, settings) : null,
+        resolvedQuestion, revision: run.revision, contentVersion: version.version_id, context,
+        request: context.length ? answerRequest(question, context, settings, history) : null,
         safety: { topic, review }, elapsedMs: Math.round(performance.now() - started),
       } } : {}) };
     } catch (error) {

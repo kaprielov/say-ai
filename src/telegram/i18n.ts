@@ -4,6 +4,28 @@ export type Language = 'en' | 'ru';
 
 // Keep manager copy available in every supported interface language.
 const russian: Record<string, string> = {
+  "Custom value": "Своё значение",
+  "Dialogue history exceeds the context limit.": "История диалога превышает допустимый объём. Начните новый диалог командой /reset.",
+  "Ask me a question about the knowledge base. Use /reset to start a new conversation.": "Задайте вопрос по базе знаний. Команда /reset начинает новый диалог.",
+  "Dialogue memory": "Память диалога",
+  "Remembered pairs": "Количество пар",
+  "Inactivity timeout": "Сброс по неактивности",
+  "Disable memory": "Отключить память",
+  "Clear all dialogues": "Очистить все диалоги",
+  "All dialogues cleared.": "Все диалоги очищены.",
+  "Clear every visitor and test dialogue for @{username}? This cannot be undone.": "Очистить все диалоги посетителей и тестовые диалоги @{username}? Это действие нельзя отменить.",
+  "Dialogue cleared. Your next question starts a new conversation.": "Диалог очищен. Следующий вопрос начнёт новый разговор.",
+  "Test dialogues cleared.": "Тестовые диалоги очищены.",
+  "Send another test question, or return to settings.": "Отправьте следующий тестовый вопрос или вернитесь к настройкам.",
+  "{count} pairs": "{count} пар",
+  "Reset after {minutes} min": "Сброс через {minutes} мин",
+  "Choose a valid memory preset.": "Введите от 0 до 20 пар или от 5 до 10080 минут для выбранной настройки.",
+  "Choose how many pairs to remember. Zero disables memory. Saving clears existing dialogues.": "Выберите количество пар сообщений. Ноль отключает память. Сохранение очищает существующие диалоги.",
+  "Choose when an inactive dialogue expires. Saving clears existing dialogues.": "Выберите срок сброса неактивного диалога. Сохранение очищает существующие диалоги.",
+  "Send the number of pairs, from 0 to 20. Zero disables memory. Saving clears existing dialogues.": "Отправьте количество пар от 0 до 20. Ноль отключает память. Сохранение очищает существующие диалоги.",
+  "Send the inactivity timeout in minutes, from 5 to 10080 (7 days). Saving clears existing dialogues.": "Отправьте срок неактивности в минутах: от 5 до 10080 (7 дней). Сохранение очищает существующие диалоги.",
+  "Dialogue memory for @{username}\nPairs: {pairs} (0 = disabled)\nReset after inactivity: {minutes} minutes\n\nOne pair is a question and its answer. Changes apply immediately and clear existing dialogues. More pairs increase cost; a token limit also applies. Visitors can use /reset to clear their own dialogue. Tests have separate history. Facts still come from the knowledge base.": "Память диалога @{username}\nПар сообщений: {pairs} (0 = отключена)\nСброс по неактивности: {minutes} мин\n\nОдна пара — вопрос и ответ. Изменения применяются сразу и очищают существующие диалоги. Больше пар — выше стоимость; также действует лимит объёма. Посетитель может очистить свой диалог командой /reset. История тестов хранится отдельно. Факты по-прежнему берутся из базы знаний.",
+
   'Model review disabled': 'Проверка моделью отключена',
   'Safety checks: {topic}. Answer review: {review}.': 'Проверки: {topic}. Проверка ответа: {review}.',
   'Related question': 'Вопрос по теме', 'Social message': 'Общение',

@@ -36,7 +36,7 @@ before(async () => {
 });
 
 beforeEach(async () => {
-  await pool.query('TRUNCATE telegram_visitors, telegram_security_notices, telegram_notifications, telegram_bots, chunks, content_versions, ingestion_tasks, knowledge_bases');
+  await pool.query('TRUNCATE telegram_dialogues, telegram_visitors, telegram_security_notices, telegram_notifications, telegram_bots, chunks, content_versions, ingestion_tasks, knowledge_bases');
 });
 
 afterEach(async () => {
@@ -605,4 +605,70 @@ test('live prompt-injection defenses retain benign usefulness and resist held-ou
     } catch { failures.push(item.id); }
   }
   assert.deepEqual(failures, [], `Synthetic security evaluation failed: ${failures.join(', ')}`);
+});
+
+test('follow-ups search and review the resolved question while answers receive dialogue separately', async () => {
+  const kb = await readyKnowledgeBase();
+  const history = [{ question: 'What can you tell me about logs?', answer: 'I can explain retention.' }];
+  const resolved = 'How long are audit logs retained?';
+  let resolutions = 0;
+  const questions = service({
+    embedder: () => ({ embed: async input => { assert.deepEqual(input, [resolved]); return [[1, 0, 0]]; } }),
+    answerer: {
+      resolveQuestion: async (question, pairs) => { resolutions++; assert.equal(question, 'How long?'); assert.deepEqual(pairs, history); return resolved; },
+      answer: async (question, context, _signal, _settings, pairs) => {
+        assert.equal(question, 'How long?'); assert.deepEqual(pairs, history);
+        return { outcome: 'answered', answer: '37 days.', chunk_ids: [context[0].id], topic: 'related' };
+      },
+    },
+    safety: { classify: async question => { assert.equal(question, resolved); return 'related'; }, review: async question => { assert.equal(question, resolved); return true; } },
+  });
+  const settings = { instructions: '', detail: 'standard', language: 'auto', retrieval: 'balanced' };
+  const result = await questions.ask(kb.kbId, ownerId, 'How long?', new AbortController().signal, { settings, revision: 'test', inspect: true, history });
+  assert.equal(result.answer, '37 days.');
+  assert.equal(resolutions, 1);
+  assert.equal(result.debug.resolvedQuestion, resolved);
+  assert.deepEqual(JSON.parse(result.debug.request.input[0].content).history, history);
+});
+
+test('live conversation evaluation resolves references without promoting prior claims to evidence', {
+  skip: process.env.RUN_LIVE_QUERY_TEST !== 'true',
+}, async () => {
+  const { readFile } = await import('node:fs/promises');
+  const cases = JSON.parse(await readFile(new URL('./fixtures/conversation-cases.json', import.meta.url), 'utf8'));
+  const key = process.env.OPENAI_API_KEY;
+  assert.ok(key);
+  const source = 'Norvi is a fictional store. Delivery options are courier and pickup. Courier costs 12 euros. Pickup costs 5 euros. The store opens at 9 AM. No insurance details are available.';
+  const embedder = new OpenAIEmbedder(key, 'text-embedding-3-small', 1536);
+  const [vector] = await embedder.embed([source], new AbortController().signal);
+  const kb = await readyKnowledgeBase({ text: source, vector });
+  const questions = service({ embedder: () => embedder, answerer: new OpenAIAnswerer(key) });
+  for (const item of cases) {
+    const result = await questions.ask(kb.kbId, ownerId, item.question, new AbortController().signal, {
+      settings: { instructions: '', detail: 'standard', language: 'en', retrieval: 'balanced' },
+      revision: 'conversation-evaluation', inspect: true, history: item.history,
+    });
+    assert.ok(item.allowedOutcomes.includes(result.outcome), item.id);
+    if (item.mustContain) assert.ok(result.answer?.includes(item.mustContain), item.id);
+    for (const forbidden of item.mustNotContain) assert.ok(!result.answer?.includes(forbidden), item.id);
+    console.log(JSON.stringify({ case: item.id, outcome: result.outcome, resolvedQuestion: result.debug.resolvedQuestion, answer: result.answer }));
+  }
+});
+
+test('a content activation between dialogue loading and retrieval discards history before paid resolution', async () => {
+  const kb = await readyKnowledgeBase();
+  let resolutions = 0;
+  const questions = service({ answerer: {
+    resolveQuestion: async () => { resolutions++; throw new Error('Stale history must not reach the provider.'); },
+    answer: async (_question, context, _signal, _settings, history) => {
+      assert.deepEqual(history, []);
+      return { outcome: 'answered', answer: '37 days.', chunk_ids: [context[0].id] };
+    },
+  } });
+  const result = await questions.ask(kb.kbId, ownerId, 'Retention?', new AbortController().signal, {
+    settings: { instructions: '', detail: 'standard', language: 'auto', retrieval: 'balanced' }, revision: 'test',
+    historyVersion: randomUUID(), history: [{ question: 'Outdated product?', answer: 'Outdated answer.' }],
+  });
+  assert.equal(result.answer, '37 days.');
+  assert.equal(resolutions, 0);
 });

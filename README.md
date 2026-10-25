@@ -260,7 +260,7 @@ Operations still running after cancellation remain counted until they settle. A 
 | `503` | OpenAI credentials are absent or the stored embedding configuration is unsupported. Ingestion can be paused independently of querying. |
 | `504` | The query exceeded its 30-second deadline. |
 
-A redirection or insufficient-evidence outcome is a successful `200` response, separate from a provider-level safety refusal or processing failure. Production queries do not maintain a conversation history. Owner-initiated bot tests can retain the latest diagnostic snapshot as described under Per-bot answer settings and testing. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
+A redirection or insufficient-evidence outcome is a successful `200` response, separate from a provider-level safety refusal or processing failure. HTTP queries are stateless; managed Telegram bots can use bounded dialogue memory described below. Owner-initiated bot tests can retain the latest diagnostic snapshot as described under Per-bot answer settings and testing. Request prompts are sent to OpenAI, with response storage disabled in the Responses request.
 
 To run the optional paid live check using a synthetic knowledge base in a temporary database:
 
@@ -377,7 +377,7 @@ The persistent outbox retries message delivery up to five times and honors Teleg
 
 External API calls and PostgreSQL cannot commit atomically. An interruption after Telegram accepts an outgoing message but before its deletion from the outbox can duplicate that message. A crash after an AI request but before the update transaction commits can repeat the provider request and its charges. The current worker is intentionally sequential, so a slow question delays other Telegram requests; scale this before serving sustained traffic. Telegram's update retention also limits recovery from prolonged downtime.
 
-Owner daily customer and test quotas are independent and default to zero (no daily quota). The manager's **Settings → Owner limits** menu configures them. `TELEGRAM_DAILY_QUERY_LIMIT` optionally supplies the initial customer quota; explicit owner settings take precedence. Admitted provider failures consume the appropriate quota. Database calendar days determine resets. Quotas count requests, not exact currency. Telegram users can hold at most 20 knowledge bases. Conversation history is not supplied to the model.
+Owner daily customer and test quotas are independent and default to zero (no daily quota). The manager's **Settings → Owner limits** menu configures them. `TELEGRAM_DAILY_QUERY_LIMIT` optionally supplies the initial customer quota; explicit owner settings take precedence. Admitted provider failures consume the appropriate quota. Database calendar days determine resets. Quotas count requests, not exact currency. Telegram users can hold at most 20 knowledge bases. Managed bots use the configurable dialogue memory described below.
 
 Each bot's **Spam protection** menu configures visitor quotas (5/minute, 30/day by default), duplicate suppression (60 seconds), an off-topic window (10 minutes), warning threshold (3 requests), initial pause (15 minutes), repeated-abuse pause (6 hours), repeat window after a pause (24 hours), and notifications (enabled, coalesced over 15 minutes). Zero disables the corresponding soft rule; disabling visitor frequency limits still leaves the operator's 30/minute ceiling. Notification coalescing has a one-minute operator minimum. On the threshold request the bot warns; a further clearly off-topic request in the window pauses answers. Greetings, complaints, missing knowledge, and uncertain classifications do not count as violations. Only validated redirections classified as clearly off-topic count. Blocked messages do not call the model or extend the block. Exact normalized duplicates do not call the model or resend replies. The repeat window starts at the end of a pause. An owner can page through active restrictions and remove individual restrictions from the manager. Repeated-abuse notices include a count and links to restrictions/settings; they use the owner's selected language and the durable outbox. Full message text is not retained for moderation. Restriction timestamps are explicitly displayed in UTC. Owner transfer clears the previous visitor state, settings, and pending security notices.
 
@@ -390,6 +390,40 @@ Telegram webhook delivery is capped at two connections per bot. Temporary Cloudf
 The Telegram worker removes completed update identifiers after seven days in bounded batches, inactive visitor state after 30 days (preserving active restrictions/repeat windows), daily usage after 90 days, and expired owner-rate rows after one day. Source questions and generated answers are not stored by the query API. Queue payloads are cleared on completion. Telegram queued payloads and outgoing messages still exist until processed/delivered. Sustained-load and representative multilingual topic-classification evaluation remain required before production rollout.
 
 Run `npm run test:telegram` for isolated-database integration tests with controlled Telegram and answer transports. No real Telegram or paid OpenAI requests are made by these tests.
+
+### Dialogue memory
+
+Open **My bots → a bot → Dialogue memory**. Defaults apply to existing and new bots:
+5 question/answer pairs, reset after 60 minutes of inactivity. Choose 0–20 pairs
+(0 disables memory) and an inactivity timeout of 5–10080 minutes (up to 7 days),
+using presets or custom values. These settings apply immediately, independently of
+answer-setting drafts, and clear existing visitor and test dialogues. **Clear all
+dialogues** requires confirmation. A visitor can send `/reset` (also while the bot
+is paused) to clear only their own history without a model request or query quota.
+In the manager, `/reset` clears the owner's test dialogues.
+
+History is isolated by bot and visitor. Manager tests use separate published/draft
+histories. Changing the knowledge base, its active content version, or the selected
+answer-settings revision makes prior history inapplicable. Reconnecting a bot also
+clears its history. A dialogue stores complete pairs, with a second limit of 6000
+history tokens; expired history is ignored immediately and deleted in bounded
+background batches. Rejected, duplicate, rate-limited and failed requests, and
+confirmed off-topic exchanges, do not extend history. Delivered fallback replies
+for insufficient evidence can be retained for conversational continuity.
+
+For a follow-up with history, one additional owner-funded model request resolves
+references into a standalone search question. Retrieval and optional safety checks
+use that question. Generation receives the original question and history as
+untrusted data, separately from current source evidence. Previous answers are not
+sources of facts. More history increases input cost; disabling memory avoids the
+additional resolution call. HTTP queries and direct knowledge-base tests remain
+stateless. This is short-term context, not a long-term user profile or archive.
+
+`npm run test:queries` includes the isolated dialogue request and budget checks.
+The opt-in live conversation evaluation in `tests/queries.test.mjs` uses
+`tests/fixtures/conversation-cases.json` for follow-ups, topic changes, and
+unverified prior claims. It requires `RUN_LIVE_QUERY_TEST=true` and makes paid
+provider calls; it is skipped in deterministic runs.
 
 ### Per-bot answer settings and testing
 
@@ -421,16 +455,14 @@ published settings or the draft. It uses the owner's OpenAI key and test quota,
 without customer delivery or visitor penalties. Results show the outcome, settings
 revision, elapsed processing time, topic and optional evidence-review status, selected source
 context, and the assembled generation request without transport headers. The request
-view shows the single generation payload. Extra model review is marked disabled. Changing settings requires reselecting a test
+view shows the generation payload, including dialogue history when enabled; it does not show the separate follow-up resolution request. Extra model review is marked disabled. Changing settings requires reselecting a test
 version. Every question captures the ready knowledge-base version at execution time;
 this is not a fixed-version comparison experiment.
 
 Only the latest test's details are kept in the owner's manager session. Leaving
 testing clears them; details expire after 24 hours and background cleanup removes
 expired content in bounded batches. Details explicitly opened in Telegram remain
-in that private conversation under Telegram's normal message retention. Production
-question history, analytics dashboards, Langfuse, and batch evaluation are outside
-this release. Failed test calls show a sanitized error code rather than provider
+in that private conversation under Telegram's normal message retention. Long-term conversation archives, analytics dashboards, Langfuse, and batch evaluation are outside this release. Failed test calls show a sanitized error code rather than provider
 response bodies; full context inspection currently requires a completed query. Additional model-based
 checks are currently disabled; factual support still requires semantic evaluation.
 

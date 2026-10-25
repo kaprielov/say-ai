@@ -116,7 +116,8 @@ test('progress migration rolls back and reapplies without changing queued work',
   const env = { ...process.env, DATABASE_URL: pool.options.connectionString };
   await pool.query("INSERT INTO telegram_updates(bot_id,update_id,payload) VALUES (303,1,'{}')");
   try {
-    await exec(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', 'down', '1', '--no-verbose'], { env });
+    const rollbackCount = (await pool.query("SELECT count(*)::int AS count FROM pgmigrations WHERE id >= (SELECT id FROM pgmigrations WHERE name='1793145600000_worker_progress')")).rows[0].count;
+    await exec(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', 'down', String(rollbackCount), '--no-verbose'], { env });
     assert.equal((await pool.query("SELECT to_regclass('worker_progress') AS name")).rows[0].name, null);
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_updates WHERE bot_id=303')).rows[0].count, 1);
     await exec(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', 'up', '--no-verbose'], { env });

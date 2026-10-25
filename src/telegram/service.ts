@@ -1,3 +1,4 @@
+import { loadDialogue, saveDialogue, type MemorySettings } from './memory.js';
 import { BotSettings, type BotAnswerSettings, type SettingsState } from '../bots/settings.js';
 import type { OwnerCredentials } from '../providers/owner-openai.js';
 import { translator, type Language } from './i18n.js';
@@ -29,7 +30,7 @@ export type Update = {
   managed_bot?: { user: User; bot: User };
 };
 type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null; tuning_bot_id?: string | null; tuning_version?: string | null; tuning_mode?: string | null; tuning_result?: { debug?: { revision: string; contentVersion: string; elapsedMs: number; safety?: { topic: string; review: string }; context: {id: string; text: string}[]; request: unknown } } | null };
-type Bot = { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean; protection: Record<string, number>; answer_settings: SettingsState };
+type Bot = MemorySettings & { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean; protection: Record<string, number>; answer_settings: SettingsState };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const safetyLabels: Record<string, string> = { related: 'Related question', social: 'Social message', missing_information: 'Related question without evidence', off_topic: 'Unrelated question', uncertain: 'Unclear question', not_generated: 'Not generated', not_required: 'Not required', blocked_links: 'Blocked by link policy', rejected: 'Not supported by evidence', supported: 'Passed evidence review', disabled: 'Model review disabled' };
 const settingLabels: Record<string, string> = { standard: 'Standard', concise: 'Concise', detailed: 'Detailed', auto: 'Match question language', ru: 'Russian', en: 'English', balanced: 'Balanced', focused: 'Focused', expanded: 'Expanded' };
@@ -226,7 +227,64 @@ export class TelegramService {
     await this.session(db, user, 'menu');
     await this.enqueue(db, this.config.managerId, user,
       t('@{username}\nAnswers: {status}\nKnowledge base: {base}\nhttps://t.me/{username}', { username: bot.username, status: t(bot.enabled ? 'enabled' : 'paused'), base: bot.knowledge_base_id ? (await this.base(db, user, bot.knowledge_base_id)).name : t('not selected') }),
-      buttons([[[t('Answer settings'), `bs:${id}`], [t('Test bot'), `bt:${id}`]], [[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Spam protection'), `protect:${id}`]], [[t('Help'), `help:bot:${id}`]], [[t('Back'), `bots:${page}`], [t('Main menu'), 'menu']]]));
+      buttons([[[t('Answer settings'), `bs:${id}`], [t('Test bot'), `bt:${id}`]], [[t('Choose knowledge base'), `choose:${id}`]], [[bot.enabled ? t('Pause answers') : t('Publish / enable answers'), `toggle:${id}`]], [[t('Dialogue memory'), `memory:${id}`], [t('Spam protection'), `protect:${id}`]], [[t('Help'), `help:bot:${id}`]], [[t('Back'), `bots:${page}`], [t('Main menu'), 'menu']]]));
+  }
+
+  async memoryAction(db: PoolClient, user: number, data: string): Promise<boolean> {
+    const [action, id, value] = data.split(':');
+    if (!['memory', 'mp', 'mi', 'mc', 'mcc', 'mn', 'mt', 'me'].includes(action)) return false;
+    const bot = await this.bot(db, user, id);
+    const t = await this.locale(db, user);
+    await this.session(db, user, 'menu');
+    if (action === 'me') {
+      if (!['pairs', 'idle'].includes(value ?? '')) return true;
+      await this.session(db, user, 'memory_value', null, `${id}:${value}`);
+      await this.enqueue(db, this.config.managerId, user, t(value === 'pairs'
+        ? 'Send the number of pairs, from 0 to 20. Zero disables memory. Saving clears existing dialogues.'
+        : 'Send the inactivity timeout in minutes, from 5 to 10080 (7 days). Saving clears existing dialogues.'),
+        buttons([[[t('Back'), `memory:${id}`], [t('Help'), 'help:bot']], [[t('Main menu'), 'menu']]]));
+      return true;
+    }
+    if (action === 'mn' || action === 'mt') {
+      const pairs = action === 'mn';
+      await this.enqueue(db, this.config.managerId, user, t(pairs
+        ? 'Choose how many pairs to remember. Zero disables memory. Saving clears existing dialogues.'
+        : 'Choose when an inactive dialogue expires. Saving clears existing dialogues.'), buttons([
+        ...(pairs ? [0, 1, 5, 10, 20] : [15, 60, 1440, 10080]).map(n => [[
+          t(pairs ? '{count} pairs' : 'Reset after {minutes} min', { count: String(n), minutes: String(n) }), `${pairs ? 'mp' : 'mi'}:${id}:${n}`,
+        ]] as [string,string][]),
+        [[t('Custom value'), `me:${id}:${pairs ? 'pairs' : 'idle'}`]],
+        [[t('Back'), `memory:${id}`], [t('Main menu'), 'menu']],
+      ]));
+      return true;
+    }
+    if (action === 'mc') {
+      await this.enqueue(db, this.config.managerId, user, t('Clear every visitor and test dialogue for @{username}? This cannot be undone.', { username: bot.username }),
+        buttons([[[t('Clear all dialogues'), `mcc:${id}`]], [[t('Back'), `memory:${id}`], [t('Main menu'), 'menu']]]));
+      return true;
+    }
+    if (action === 'mp' || action === 'mi') {
+      const valid = value && /^\d{1,5}$/.test(value) && (action === 'mp' ? Number(value) <= 20 : Number(value) >= 5 && Number(value) <= 10080);
+      if (!valid) throw new QueryError(400, 'invalid_memory', 'Choose a valid memory preset.');
+      const column = action === 'mp' ? 'memory_pairs' : 'memory_idle_minutes';
+      await db.query(`UPDATE telegram_bots SET ${column}=$3,memory_epoch=gen_random_uuid() WHERE id=$1 AND owner_id=$2`, [id, ownerId(user), Number(value)]);
+      await db.query('DELETE FROM telegram_dialogues WHERE bot_id=$1', [id]);
+      return this.memoryAction(db, user, `memory:${id}`);
+    }
+    if (action === 'mcc') {
+      await db.query('UPDATE telegram_bots SET memory_epoch=gen_random_uuid() WHERE id=$1 AND owner_id=$2', [id, ownerId(user)]);
+      await db.query('DELETE FROM telegram_dialogues WHERE bot_id=$1', [id]);
+      await this.enqueue(db, this.config.managerId, user, t('All dialogues cleared.'));
+      return this.memoryAction(db, user, `memory:${id}`);
+    }
+    await this.enqueue(db, this.config.managerId, user, t('Dialogue memory for @{username}\nPairs: {pairs} (0 = disabled)\nReset after inactivity: {minutes} minutes\n\nOne pair is a question and its answer. Changes apply immediately and clear existing dialogues. More pairs increase cost; a token limit also applies. Visitors can use /reset to clear their own dialogue. Tests have separate history. Facts still come from the knowledge base.',
+      { username: bot.username, pairs: String(bot.memory_pairs), minutes: String(bot.memory_idle_minutes) }), buttons([
+      [[t('Remembered pairs'), `mn:${id}`], [t('Inactivity timeout'), `mt:${id}`]],
+      [[t('Disable memory'), `mp:${id}:0`]],
+      [[t('Clear all dialogues'), `mc:${id}`]],
+      [[t('Back'), `bot:${id}`], [t('Main menu'), 'menu']],
+    ]));
+    return true;
   }
 
   async showAnswerSettings(db: PoolClient, user: number, id: string) {
@@ -477,10 +535,14 @@ export class TelegramService {
     const t = await this.locale(db, user.id);
     if (botId !== this.config.managerId) {
       const bot = (await db.query<Bot>('SELECT * FROM telegram_bots WHERE id = $1', [botId])).rows[0];
-      if (!bot?.enabled || !bot.knowledge_base_id) {
+      if (/^\/reset(?:@\w+)?(?:\s|$)/.test(message.text ?? '')) {
+        await db.query('DELETE FROM telegram_dialogues WHERE bot_id=$1 AND user_id=$2', [botId, user.id]);
+        await db.query('UPDATE telegram_visitors SET last_hash=NULL,last_question_at=NULL WHERE bot_id=$1 AND user_id=$2', [botId, user.id]);
+        await this.enqueue(db, botId, user.id, t('Dialogue cleared. Your next question starts a new conversation.'));
+      } else if (!bot?.enabled || !bot.knowledge_base_id) {
         await this.enqueue(db, botId, user.id, t('This bot is currently paused.'));
       } else if (message.text?.startsWith('/start')) {
-        await this.enqueue(db, botId, user.id, t('Ask me a question about the knowledge base.'));
+        await this.enqueue(db, botId, user.id, t('Ask me a question about the knowledge base. Use /reset to start a new conversation.'));
       } else if (message.text) {
         await this.answer(db, botId, user.id, bot.owner_id, bot.knowledge_base_id, message.text);
       }
@@ -492,6 +554,15 @@ export class TelegramService {
     }
     const text = message.text;
     const command = text?.split(' ')[0];
+    if (command === '/reset') {
+      await db.query("DELETE FROM telegram_dialogues WHERE user_id=$1 AND scope LIKE 'test:%' AND bot_id IN (SELECT id FROM telegram_bots WHERE owner_id=$2)", [user.id, ownerId(user.id)]);
+      await this.enqueue(db, botId, user.id, t('Test dialogues cleared.'));
+      const current = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id=$1', [user.id])).rows[0];
+      if (current?.state === 'bot_test') {
+        await this.enqueue(db, botId, user.id, t('Send another test question, or return to settings.'), buttons([[[t('Back'), `bt:${current.tuning_bot_id}`], [t('Main menu'), 'menu']]]));
+      } else await this.menu(db, user.id);
+      return;
+    }
     if (callback?.data === 'language' || command === '/language') return this.chooseLanguage(db, user.id);
     if (callback?.data?.startsWith('lang:')) {
       const language = callback.data.slice(5);
@@ -535,9 +606,16 @@ export class TelegramService {
       if (!(await this.credentials.available(ownerId(user.id)))) return this.keySettings(db, user.id);
     }
     if (callback?.data) {
+      if (await this.memoryAction(db, user.id, callback.data)) return;
       if (await this.botSettingsAction(db, user.id, callback.data)) return;
       if (await this.protectionAction(db, user.id, callback.data)) return;
       return this.action(db, user.id, callback.data);
+    }
+    if (session.state === 'memory_value' && session.draft_name) {
+      const [target, field] = session.draft_name.split(':');
+      if (!text || !/^\d{1,5}$/.test(text.trim())) throw new QueryError(400, 'invalid_memory', 'Choose a valid memory preset.');
+      await this.memoryAction(db, user.id, `${field === 'pairs' ? 'mp' : 'mi'}:${target}:${text.trim()}`);
+      return;
     }
     if (session.state === 'bot_instructions') {
       if (!text?.trim()) throw new QueryError(400, 'invalid_bot_settings', 'Send text instructions, or use Clear instructions to reset them.');
@@ -617,6 +695,7 @@ export class TelegramService {
     if (action === 'settings') return this.settings(db, user);
     if (action === 'continue') {
       const session = (await db.query<Session>('SELECT * FROM telegram_sessions WHERE user_id=$1', [user])).rows[0];
+      if (session?.state === 'memory_value' && session.draft_name) return this.memoryAction(db, user, `me:${session.draft_name}`);
       if (session?.tuning_bot_id) return this.botSettingsAction(db, user, session.state === 'bot_instructions' ? `bi:${session.tuning_bot_id}:${session.tuning_version}` : `bq:${session.tuning_bot_id}:${session.tuning_mode}`);
       if (session?.state === 'protection_setting' && session.draft_name) {
         const [bot, key] = session.draft_name.split(':');
@@ -654,6 +733,7 @@ export class TelegramService {
       if (!extra && session?.state !== 'bind') throw new QueryError(409, 'expired_action', t('Choose the bot again from My bots.'));
       const bot = await this.bot(db, user, extra ? id : session.draft_name!);
       await db.query("UPDATE telegram_bots SET knowledge_base_id = $1, enabled = false, answer_settings=jsonb_set(answer_settings,'{version}',to_jsonb(gen_random_uuid()::text)) WHERE id = $2", [baseId, bot.id]);
+      await db.query('DELETE FROM telegram_dialogues WHERE bot_id=$1', [bot.id]);
       await this.session(db, user, 'menu');
       return this.showBot(db, user, bot.id);
     }
@@ -737,8 +817,17 @@ export class TelegramService {
     try {
       if (run) await db.query('UPDATE telegram_sessions SET tuning_result=NULL WHERE user_id=$1', [chat]);
       const configuration = run ?? (bot ? { settings: bot.answer_settings.published.settings, revision: bot.answer_settings.published.id } : undefined);
-      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration);
-      await this.enqueue(db, botId, chat, result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?'));
+      const memoryBot = bot ?? (run ? await this.bot(db, chat, run.target) : undefined);
+      const scope = testing ? `test:${run?.revision === memoryBot?.answer_settings.published.id ? 'published' : 'draft'}` : 'visitor';
+      const version = memoryBot ? (await db.query('SELECT active_version_id FROM knowledge_bases WHERE id=$1 AND owner_id=$2', [kb, owner])).rows[0]?.active_version_id : '';
+      const signature = `${memoryBot?.memory_epoch}:${kb}:${version}:${configuration?.revision}`;
+      const history = memoryBot ? await loadDialogue(db, memoryBot.id, chat, scope, signature, memoryBot) : [];
+      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration ? { ...configuration, history, historyVersion: version } : undefined);
+      const reply = result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?');
+      await this.enqueue(db, botId, chat, reply);
+      if (memoryBot && result.topic !== 'off_topic') {
+        await saveDialogue(db, memoryBot.id, chat, scope, signature, memoryBot, [...history, { question, answer: reply }]);
+      }
       if (run) {
         await db.query('UPDATE telegram_sessions SET tuning_result=$2, updated_at=now() WHERE user_id=$1', [chat, { debug: result.debug }]);
         let summary = t('Test result: {outcome}. Version: {revision}. Duration: {ms} ms. Details are kept until you leave testing, for up to 24 hours.', { outcome: t(result.outcome), revision: run.revision.slice(0, 8), ms: String(result.debug?.elapsedMs ?? 0) });
@@ -795,9 +884,10 @@ export class TelegramService {
       if (existing) {
         await db.query('DELETE FROM telegram_visitors WHERE bot_id=$1', [id]);
         await db.query('DELETE FROM telegram_security_notices WHERE bot_id=$1', [id]);
-        await db.query("UPDATE telegram_bots SET protection='{}', answer_settings=DEFAULT WHERE id=$1", [id]);
+        await db.query("UPDATE telegram_bots SET protection='{}', answer_settings=DEFAULT, memory_pairs=DEFAULT, memory_idle_minutes=DEFAULT, memory_epoch=DEFAULT WHERE id=$1", [id]);
       }
     }
+    await db.query('DELETE FROM telegram_dialogues WHERE bot_id=$1', [id]);
     await db.query(`
       INSERT INTO telegram_bots (id, owner_id, username, knowledge_base_id, token_ciphertext, webhook_secret, enabled)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
