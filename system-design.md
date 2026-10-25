@@ -60,6 +60,7 @@ Telegram adds these durable tables to the original knowledge-base/version/chunk/
 | `owner_openai_keys` | Encrypted OpenAI credential, revision, and validity per owner. |
 | `openai_key_attempts` | Per-owner credential validation rate limit. |
 | `telegram_usage` | Independent daily admitted customer and test question counts per owner. |
+| `provider_spending` | Owner-scoped API-attempt ledger with bot/base attribution, purpose, returned token usage, versioned rates, and estimated USD; unknown costs remain explicit. Stored independently of delivery/content transactions. |
 
 Webhooks verify their secret header before parsing and acknowledge only after persisting the update. One Telegram worker holds its own advisory lock and processes updates in arrival order. Source changes, session changes, outgoing replies, and update completion share a transaction. Transient processing failures receive up to three attempts; a delayed update holds later work. The outbox makes up to five delivery attempts and honors Telegram rate-limit delays. Permanent credential failures can pause the affected child without disabling other bots. PostgreSQL commits and external API calls are not atomic: a crash can duplicate message delivery or a provider call and its charges.
 

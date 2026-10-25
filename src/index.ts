@@ -19,7 +19,7 @@ const questions = queryConfig || ownerOpenAI ? new QuestionAnswering({
   pool,
   embedder: (model, dimensions) => new OpenAIEmbedder(queryConfig?.apiKey ?? '', model, dimensions),
   answerer: new OpenAIAnswerer(queryConfig?.apiKey ?? ''),
-  providers: ownerOpenAI ? (owner, model, dimensions) => ownerOpenAI.providers(owner, model, dimensions) : undefined,
+  providers: ownerOpenAI ? (owner, model, dimensions, context) => ownerOpenAI.providers(owner, model, dimensions, context) : undefined,
 }) : undefined;
 const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions, ownerOpenAI) : undefined;
 const app = createApp({ pool, ...readAuthConfig(), questions, telegram });
@@ -46,7 +46,7 @@ if (ingestion) {
     worker = await startIngestionWorker(pool, new OpenAIEmbedder(ingestion.apiKey ?? '', ingestion.model, ingestion.dimensions), () => {
       console.error('Ingestion worker stopped unexpectedly. Restart the application to recover unfinished work.');
       void shutdown(true);
-    }, ownerOpenAI ? owner => ownerOpenAI.ingestionEmbedder(owner, ingestion.model, ingestion.dimensions) : undefined);
+    }, ownerOpenAI ? (owner, knowledgeBaseId) => ownerOpenAI.ingestionEmbedder(owner, ingestion.model, ingestion.dimensions, knowledgeBaseId) : undefined);
   } catch {
     console.error('Unable to start ingestion worker. Check database availability and ensure only one application instance is running.');
     await pool.end();

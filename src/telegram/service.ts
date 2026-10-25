@@ -1,6 +1,7 @@
 import { loadDialogue, saveDialogue, type MemorySettings } from './memory.js';
 import { BotSettings, type BotAnswerSettings, type SettingsState } from '../bots/settings.js';
 import type { OwnerCredentials } from '../providers/owner-openai.js';
+import { spendingSummary, spendingAmount, type SpendingPeriod } from '../providers/spending.js';
 import { translator, type Language } from './i18n.js';
 import { startTyping } from './typing.js';
 import { protectionFields, protectionHelp, protectionSettings, visitorAdmission, ownerAdmission, recordOffTopic, type ProtectionKey } from './protection.js';
@@ -150,6 +151,7 @@ export class TelegramService {
     if (this.credentials && !(await this.credentials.available(ownerId(user)))) return this.keySettings(db, user);
     await this.enqueue(db, this.config.managerId, user, t('Manage your knowledge bases and Telegram bots.'), buttons([
       [[t('My bots'), 'bots:0'], [t('My knowledge bases'), 'bases:0']],
+      [[t('Spending'), 'spending:month:0:menu']],
       [[t('Create knowledge base'), 'new']], [[t('Settings'), 'settings'], [t('Help'), 'help:menu']],
     ]));
   }
@@ -158,8 +160,45 @@ export class TelegramService {
     const t = await this.locale(db, user);
     await this.session(db, user, 'menu');
     return this.enqueue(db, this.config.managerId, user, t('Account settings'), buttons([
-      [[t('OpenAI key'), 'openai']], [[t('Language'), 'language'], [t('Owner limits'), 'limits']], [[t('Back'), 'menu']],
+      [[t('OpenAI key'), 'openai']], [[t('Spending'), 'spending:month:0']], [[t('Language'), 'language'], [t('Owner limits'), 'limits']], [[t('Back'), 'menu']],
     ]));
+  }
+
+  async spending(db: PoolClient, user: number, data: string) {
+    const match = /^spending:(today|week|month):(\d{1,6})(?::(menu))?$/.exec(data);
+    if (!match) throw new QueryError(400, 'invalid_spending_period', 'Choose a spending period.');
+    const period = match[1] as SpendingPeriod;
+    const page = Number(match[2]);
+    const origin = match[3] ? ':menu' : '';
+    const t = await this.locale(db, user);
+    await this.session(db, user, 'menu');
+    const { summary, bots, more } = await spendingSummary(db, ownerId(user), period, page);
+    const labels = { answers: 'Bot answers', testing: 'Testing', ingestion: 'Document processing', key_check: 'Key verification' };
+    const periodLabels = { today: 'Today (UTC)', week: 'Last 7 days', month: 'This month (UTC)' };
+    const amount = (usd: string | number, unknown: number) => spendingAmount(usd) + (unknown ? ` + ${t('unknown cost: {count} calls', { count: String(unknown) })}` : '');
+    const total = summary.reduce((sum, row) => sum + Number(row.usd), 0);
+    const unknown = summary.reduce((sum, row) => sum + row.unknown, 0);
+    const lines = [t('Spending through Say AI'), t(periodLabels[period]), '',
+      t('Estimated total: {amount}', { amount: amount(total, unknown) })];
+    for (const [purpose, label] of Object.entries(labels)) {
+      const row = summary.find(item => item.purpose === purpose);
+      lines.push(`${t(label)}: ${amount(row?.usd ?? 0, row?.unknown ?? 0)}`);
+    }
+    if (!summary.length) lines.push('', t('No recorded API calls in this period.'));
+    if (bots.length) {
+      lines.push('', t('Bot answers by bot'));
+      for (const bot of bots) lines.push(`${bot.username ? `@${bot.username}` : t('Bot {id}', { id: bot.bot_id })}: ${amount(bot.usd, bot.unknown)}`);
+    }
+    lines.push('', t('Estimates in USD from recorded OpenAI usage and published rates. Unknown costs are excluded from the subtotal. Tracking starts after this feature is enabled; earlier spending and other apps are not included. Check final charges in OpenAI billing.'));
+    const rows: [string, string][][] = [
+      [[t('Today'), `spending:today:0${origin}`], [t('7 days'), `spending:week:0${origin}`], [t('Month'), `spending:month:0${origin}`]],
+    ];
+    const navigation: [string, string][] = [];
+    if (page > 0) navigation.push([t('Previous'), `spending:${period}:${page - 1}${origin}`]);
+    if (more) navigation.push([t('Next'), `spending:${period}:${page + 1}${origin}`]);
+    if (navigation.length) rows.push(navigation);
+    rows.push([[t('Back'), origin ? 'menu' : 'settings'], [t('Main menu'), 'menu']]);
+    return this.enqueue(db, this.config.managerId, user, lines.join('\n'), buttons(rows));
   }
 
   async help(db: PoolClient, user: number, topic: string = 'menu', full = false, context = '') {
@@ -591,7 +630,8 @@ export class TelegramService {
       return this.help(db, user.id, callback?.data?.split(':')[1], callback?.data?.startsWith('hf:'), callback?.data?.split(':')[2]);
     }
     if (command === '/start') return this.welcome(db, user.id);
-    if (command === '/settings') return this.settings(db, user.id);
+    if (command === '/settings' || callback?.data === 'settings') return this.settings(db, user.id);
+    if (callback?.data?.startsWith('spending:')) return this.spending(db, user.id, callback.data);
     if ((command && ['/menu', '/cancel'].includes(command)) || callback?.data === 'menu') return this.menu(db, user.id);
     if (this.credentials) {
       if (command === '/openai' || callback?.data === 'openai') return this.keySettings(db, user.id);
@@ -822,7 +862,8 @@ export class TelegramService {
       const version = memoryBot ? (await db.query('SELECT active_version_id FROM knowledge_bases WHERE id=$1 AND owner_id=$2', [kb, owner])).rows[0]?.active_version_id : '';
       const signature = `${memoryBot?.memory_epoch}:${kb}:${version}:${configuration?.revision}`;
       const history = memoryBot ? await loadDialogue(db, memoryBot.id, chat, scope, signature, memoryBot) : [];
-      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration ? { ...configuration, history, historyVersion: version } : undefined);
+      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration ? { ...configuration, history, historyVersion: version } : undefined,
+        { purpose: testing ? 'testing' : 'answers', botId: testing ? run?.target : botId });
       const reply = result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?');
       await this.enqueue(db, botId, chat, reply);
       if (memoryBot && result.topic !== 'off_topic') {

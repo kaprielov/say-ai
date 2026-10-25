@@ -136,19 +136,84 @@ test('owner resolution never falls back to the developer key and revoked old req
 test('indexing and answering use the base owner key rather than the global key or a different owner key', async () => {
   const kb = await transaction(pool, client => createKnowledgeBase(client, 'telegram:2', 'The shop opens at 9 AM.', 'Shop'));
   const processor = new IngestionProcessor(db, new OpenAIEmbedder('must-not-be-used', 'text-embedding-3-small', 3), undefined,
-    owner => keys.ingestionEmbedder(owner, 'text-embedding-3-small', 3));
+    (owner, baseId) => keys.ingestionEmbedder(owner, 'text-embedding-3-small', 3, baseId));
   const before = requests.length;
   await processor.processNext(new AbortController().signal);
   const answers = new QuestionAnswering({ pool, embedder() { throw new Error('Global provider was used'); }, answerer: { async answer() { throw new Error('Global provider was used'); } },
-    providers: (owner, model, dimensions) => keys.providers(owner, model, dimensions) });
+    providers: (owner, model, dimensions, context) => keys.providers(owner, model, dimensions, context) });
   const response = await answers.ask(kb.id, 'telegram:2', 'When does the shop open?', new AbortController().signal);
   assert.equal(response.outcome, 'answered');
   assert.ok(requests.slice(before).length >= 3);
   assert.ok(requests.slice(before).every(request => request.key === `Bearer ${beta}`));
   assert.equal(requests.slice(before).filter(request => request.target.endsWith('/responses')).length, 1);
   assert.ok(!requests.slice(before).some(request => ['question_topic', 'answer_support'].includes(request.body.text?.format?.name)));
+  const spending = (await pool.query('SELECT purpose, owner_id, knowledge_base_id FROM provider_spending WHERE knowledge_base_id=$1 ORDER BY id', [kb.id])).rows;
+  assert.deepEqual(spending.map(row => row.purpose), ['ingestion', 'answers', 'answers']);
+  assert.ok(spending.every(row => row.owner_id === 'telegram:2'));
   await keys.remove('telegram:2');
   await assert.rejects(answers.ask(kb.id, 'telegram:2', 'When?', new AbortController().signal), { code: 'openai_key_required' });
+});
+
+test('paid attempts keep owner, bot and usage after a caller rollback or invalid generated answer', async () => {
+  const owner = 'telegram:950';
+  const source = new OwnerOpenAI(pool, config.encryptionKey, undefined, 'text-embedding-3-small', 3, async target => {
+    if (target.endsWith('/embeddings')) return Response.json({ model: 'text-embedding-3-small', usage: { prompt_tokens: 1000 }, data: [{ index: 0, embedding: [1, 0, 0] }] });
+    return Response.json({ model: 'gpt-6-luna', status: 'incomplete', output: [], usage: {
+      input_tokens: 1000, output_tokens: 100,
+      input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+      output_tokens_details: { reasoning_tokens: 20 },
+    } });
+  });
+  await source.save(owner, alpha);
+  const resolved = await source.providers(owner, undefined, undefined, { purpose: 'testing', botId: '9500' });
+  await db.query('BEGIN');
+  try {
+    await resolved.embedder.embed(['Question'], new AbortController().signal);
+    await resolved.embedder.embed(['Retried question'], new AbortController().signal);
+    await assert.rejects(resolved.answerer.answer('Question', [], new AbortController().signal), { code: 'invalid_answer_response' });
+  } finally { await db.query('ROLLBACK'); }
+  const rows = (await pool.query('SELECT * FROM provider_spending WHERE owner_id=$1 ORDER BY id', [owner])).rows;
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map(row => row.estimated_usd), ['0.000020000000', '0.000020000000', '0.000150000000']);
+  assert.ok(rows.every(row => row.purpose === 'testing' && row.bot_id === '9500'));
+  assert.equal(rows[2].reasoning_tokens, '20');
+  assert.ok(!JSON.stringify(rows).includes(alpha));
+  assert.ok(!JSON.stringify(rows).includes('Retried question'));
+});
+
+test('network errors and unreadable provider bodies leave durable unknown costs', async () => {
+  const owner = 'telegram:951';
+  let calls = 0;
+  const source = new OwnerOpenAI(pool, config.encryptionKey, undefined, 'text-embedding-3-small', 3, async () => {
+    if (++calls === 1) throw new Error('Network interrupted');
+    return new Response('Unreadable response', { status: 502 });
+  });
+  await source.save(owner, alpha);
+  const resolved = await source.providers(owner);
+  for (let index = 0; index < 2; index++) await assert.rejects(resolved.embedder.embed(['Question'], new AbortController().signal));
+  const rows = (await pool.query('SELECT estimated_usd FROM provider_spending WHERE owner_id=$1', [owner])).rows;
+  assert.equal(calls, 2);
+  assert.deepEqual(rows, [{ estimated_usd: null }, { estimated_usd: null }]);
+});
+
+test('key verification is attributed to the authenticated owner and spending is accessible after key removal', async () => {
+  const user = 952;
+  await pool.query("INSERT INTO telegram_sessions (user_id,language) VALUES ($1,'ru')", [user]);
+  await keys.validate(alpha, `telegram:${user}`);
+  await keys.save(`telegram:${user}`, alpha);
+  await keys.remove(`telegram:${user}`);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM provider_spending WHERE owner_id=$1 AND purpose='key_check'", [`telegram:${user}`])).rows[0].n, 2);
+  await message(user, '/settings');
+  await pool.query('INSERT INTO telegram_updates (bot_id,update_id,payload) VALUES (100,$1,$2)', [++seq, { update_id: seq, callback_query: { id: 'spending', from: { id: user }, data: 'spending:month:0', message: { chat: { id: user, type: 'private' }, message_id: 125 } } }]);
+  await processUpdate(service, db);
+  const payload = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id'=$1 ORDER BY id DESC LIMIT 1", [String(user)])).rows[0].payload;
+  assert.match(payload.text, /Расходы через Say AI/);
+  assert.match(payload.text, /Проверка ключа/);
+  assert.match(payload.text, /стоимость неизвестна: 2/);
+  await pool.query('INSERT INTO telegram_updates (bot_id,update_id,payload) VALUES (100,$1,$2)', [++seq, { update_id: seq, callback_query: { id: 'spending-back', from: { id: user }, data: 'settings', message: { chat: { id: user, type: 'private' }, message_id: 125 } } }]);
+  await processUpdate(service, db);
+  const back = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id'=$1 ORDER BY id DESC LIMIT 1", [String(user)])).rows[0].payload;
+  assert.ok(back.reply_markup.inline_keyboard.flat().some(button => button.callback_data === 'spending:month:0'));
 });
 
 test('a mistakenly pasted key is redacted before the update queue and scheduled for deletion', async () => {

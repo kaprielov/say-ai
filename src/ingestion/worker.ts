@@ -4,7 +4,7 @@ import { IngestionProcessor } from './processor.js';
 import type { Embedder } from './embeddings.js';
 import { WorkerProgress } from '../worker-progress.js';
 
-export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void, ownerEmbedder?: (owner: string) => Promise<Embedder>) {
+export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void, ownerEmbedder?: (owner: string, knowledgeBaseId?: string) => Promise<Embedder>) {
   const client = await pool.connect();
   const controller = new AbortController();
   let failed = false;

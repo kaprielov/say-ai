@@ -6,6 +6,7 @@ import { countTokens } from '../ingestion/chunking.js';
 import { validateVectors, type Embedder } from '../ingestion/embeddings.js';
 import type { Answerer, ContextChunk, GeneratedAnswer, DialoguePair } from './answerer.js';
 import { QueryError } from './errors.js';
+import type { SpendingContext } from '../providers/spending.js';
 import { QUERY_DEADLINE_MS, queryLimits, type QueryLimits } from './limits.js';
 import { contextConfig, retrievalProfiles, selectContext, type PositionedChunk } from './context.js';
 
@@ -14,7 +15,7 @@ type QueryOptions = {
   embedder: (model: string, dimensions: number) => Embedder;
   answerer: Answerer;
   safety?: AnswerSafety;
-  providers?: (owner: string, model: string, dimensions: number) => Promise<{ embedder: Embedder; answerer: Answerer; safety?: AnswerSafety }>;
+  providers?: (owner: string, model: string, dimensions: number, context?: SpendingContext) => Promise<{ embedder: Embedder; answerer: Answerer; safety?: AnswerSafety }>;
   deadlineMs?: number;
   limits?: QueryLimits;
 };
@@ -24,7 +25,7 @@ const refusal = () => ({ outcome: 'insufficient_context' as const, answer: null,
 export class QuestionAnswering {
   constructor(private readonly options: QueryOptions) {}
 
-  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean; history?: DialoguePair[]; historyVersion?: string }) {
+  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean; history?: DialoguePair[]; historyVersion?: string }, spending?: Pick<SpendingContext, 'botId' | 'purpose'>) {
     const started = performance.now();
     const settings = run ? validateBotSettings(run.settings) : undefined;
     const selectedConfig = retrievalProfiles[settings?.retrieval ?? 'balanced'] ?? contextConfig;
@@ -68,7 +69,7 @@ export class QuestionAnswering {
         throw new QueryError(503, 'embedding_configuration_unavailable', 'The active version uses an unsupported embedding configuration.');
       }
       const providers = this.options.providers
-        ? await call(() => this.options.providers!(ownerId, version.embedding_model, version.embedding_dimensions))
+        ? await call(() => this.options.providers!(ownerId, version.embedding_model, version.embedding_dimensions, { purpose: 'answers', ...spending, knowledgeBaseId: id }))
         : { embedder: embedder(version.embedding_model, version.embedding_dimensions), answerer, safety };
       const history = run?.historyVersion && run.historyVersion !== version.version_id ? [] : run?.history ?? [];
       if (history.length > 20 || countTokens(JSON.stringify(history)) > 6000) {

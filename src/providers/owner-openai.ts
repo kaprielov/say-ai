@@ -4,11 +4,12 @@ import { QueryError } from '../queries/errors.js';
 import { OpenAIEmbedder, IngestionError } from '../ingestion/embeddings.js';
 import { OpenAIAnswerer } from '../queries/answerer.js';
 import { decryptToken, encryptToken } from '../telegram/client.js';
+import { spendingTransport, type SpendingContext } from './spending.js';
 
 export interface OwnerCredentials {
   available(owner: string): Promise<boolean>;
   stored(owner: string): Promise<boolean>;
-  validate(key: string): Promise<void>;
+  validate(key: string, owner?: string): Promise<void>;
   save(owner: string, key: string): Promise<void>;
   remove(owner: string): Promise<void>;
 }
@@ -46,7 +47,7 @@ export class OwnerOpenAI implements OwnerCredentials {
     await this.pool.query('DELETE FROM owner_openai_keys WHERE owner_id = $1', [owner]);
   }
 
-  async providers(owner: string, model = this.model, dimensions = this.dimensions) {
+  async providers(owner: string, model = this.model, dimensions = this.dimensions, context: SpendingContext = { purpose: 'answers' }) {
     let key: string;
     let request = this.request;
     if (owner.startsWith('telegram:')) {
@@ -63,6 +64,7 @@ export class OwnerOpenAI implements OwnerCredentials {
         }
         return response;
       };
+      request = spendingTransport(this.pool, request, owner, context);
     } else {
       if (!this.defaultKey) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
       key = this.defaultKey;
@@ -70,21 +72,22 @@ export class OwnerOpenAI implements OwnerCredentials {
     return { embedder: new OpenAIEmbedder(key, model, dimensions, request), answerer: new OpenAIAnswerer(key, request) };
   }
 
-  async ingestionEmbedder(owner: string, model = this.model, dimensions = this.dimensions) {
-    try { return (await this.providers(owner, model, dimensions)).embedder; }
+  async ingestionEmbedder(owner: string, model = this.model, dimensions = this.dimensions, knowledgeBaseId?: string) {
+    try { return (await this.providers(owner, model, dimensions, { purpose: 'ingestion', knowledgeBaseId })).embedder; }
     catch (error) {
       if (error instanceof QueryError) throw new IngestionError('owner_key_unavailable', 'Connect a valid OpenAI API key and submit the content again.', false);
       throw error;
     }
   }
 
-  async validate(key: string) {
+  async validate(key: string, owner?: string) {
     if (!/^sk-[A-Za-z0-9_-]{16,512}$/.test(key)) throw new QueryError(400, 'invalid_openai_key', 'Enter a valid OpenAI API key.');
     const controller = new AbortController();
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]);
+    const request = owner ? spendingTransport(this.pool, this.request, owner, { purpose: 'key_check' }) : this.request;
     const checkedRequest: typeof fetch = async (input, options) => {
       let response: Response;
-      try { response = await this.request(input, { ...options, signal }); }
+      try { response = await request(input, { ...options, signal }); }
       catch { throw new QueryError(503, 'key_check_unavailable', 'OpenAI could not be reached. Try again shortly.'); }
       if (!response.ok) {
         await response.body?.cancel();
@@ -105,7 +108,7 @@ export class OwnerOpenAI implements OwnerCredentials {
       if (!embedded.data?.[0]?.embedding?.length) throw new QueryError(503, 'key_check_unavailable', 'OpenAI could not validate this key. Try again shortly.');
       const response = await checkedRequest('https://api.openai.com/v1/responses', {
         method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'gpt-6-luna', reasoning: { effort: 'none' }, input: 'Reply OK.', max_output_tokens: 16, store: false }),
+        body: JSON.stringify({ model: 'gpt-6-luna', service_tier: 'default', reasoning: { effort: 'none' }, input: 'Reply OK.', max_output_tokens: 16, store: false }),
       });
       const body = await response.json() as { status?: string };
       if (body.status !== 'completed') throw new QueryError(503, 'key_check_unavailable', 'OpenAI could not validate this key. Try again shortly.');

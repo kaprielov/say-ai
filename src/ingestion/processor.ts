@@ -9,7 +9,7 @@ export class IngestionProcessor {
     private readonly client: PoolClient,
     private readonly embedder: Embedder,
     private readonly retryDelaysMs: readonly [number, number] = [10_000, 60_000],
-    private readonly ownerEmbedder?: (owner: string) => Promise<Embedder>,
+    private readonly ownerEmbedder?: (owner: string, knowledgeBaseId?: string) => Promise<Embedder>,
     private readonly onProgress?: () => Promise<void>,
   ) {}
 
@@ -96,7 +96,7 @@ export class IngestionProcessor {
       const owner = this.ownerEmbedder ? (await this.client.query<{ owner_id: string }>(
         'SELECT owner_id FROM knowledge_bases WHERE id = $1', [task.knowledge_base_id],
       )).rows[0]!.owner_id : undefined;
-      const embedder = owner ? await this.ownerEmbedder!(owner) : this.embedder;
+      const embedder = owner ? await this.ownerEmbedder!(owner, task.knowledge_base_id) : this.embedder;
       if (embedder.model !== this.embedder.model || embedder.dimensions !== this.embedder.dimensions) {
         throw new IngestionError('embedding_configuration_mismatch', 'Owner embedding configuration does not match the content version.', false);
       }
