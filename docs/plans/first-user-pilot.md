@@ -121,6 +121,9 @@ the necessary queue-processing fix before invitations.
 The current `/health` endpoint checks database connectivity only. It does not prove
 that workers are progressing, webhooks work, or answers are being delivered.
 
+- [x] Provide an initial read-only aggregate snapshot with `npm run pilot:status`:
+  worker-lock presence, pending/due/deferred updates and deliveries, retries,
+  current due age, and ingestion failures. Implemented on 2026-10-25.
 - [ ] Add or establish an operator check for worker progress, pending update/outbox
   counts, oldest queued work, and failed ingestion.
 - [ ] Capture sanitized error codes and processing timings with correlation IDs
@@ -132,6 +135,13 @@ that workers are progressing, webhooks work, or answers are being delivered.
 
 Completion evidence: a deliberate failure is visible and can be investigated.
 A full analytics platform or external tracing integration is unnecessary here.
+
+The initial snapshot does not complete this section. Worker locks do not establish
+progress, and Telegram tables currently have no separate arrival timestamp:
+`oldest_due_seconds` is based on the current retry eligibility timestamp, not
+original queue age. Heartbeats/progress detection, correlation IDs, phase timings,
+sanitized runtime error reporting, and a deliberate stalled-worker check remain
+open. See [operator command details](../../README.md#pilot-operator-check).
 
 ## Pilot setup and expectations
 
@@ -192,3 +202,11 @@ mark planned or historical checks as newly completed.
 | Date | Check | Result and evidence | Remaining limitations |
 | --- | --- | --- | --- |
 | 2026-10-24 | Local build, DB check, deterministic suite | Build and DB check passed; 125 passed, 0 failed, 2 skipped | Real Telegram, current semantic quality, concurrency, and remote deployment remain unverified |
+| 2026-10-25 | Initial operator snapshot, `scripts/pilot-status.mjs` | Three focused checks passed in a disposable DB; local `npm run pilot:status` succeeded; build passed; final full suite: 139 passed, 0 failed, 3 live cases skipped (142 total) | Lock presence is not progress; due age is not arrival age; runtime error/timing diagnostics and live checks remain open |
+
+The 2026-10-25 full-suite runs initially exposed a pre-existing clock-dependent
+Telegram assertion: the database clock was about 48 ms ahead of Node, making a
+strict six-hour upper bound fail. Commit `319a6c4` compares the remaining interval
+using the database clock. All 38 Telegram cases passed after that test-only fix,
+followed by the successful full run above. No application moderation behavior was
+changed. The operator snapshot made no external calls or database writes.

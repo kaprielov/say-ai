@@ -12,6 +12,7 @@
     "db:migrate": "node --env-file-if-exists=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js up",
     "db:rollback": "node --env-file-if-exists=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js down 1",
     "db:check": "node --env-file-if-exists=.env --import tsx scripts/check-db.ts",
+    "pilot:status": "node --env-file-if-exists=.env scripts/pilot-status.mjs",
     "test:db": "node --env-file-if-exists=.env --test tests/database.test.mjs",
     "test:api": "node --env-file-if-exists=.env --import tsx --test tests/api.test.mjs",
     "test:documents": "node --import tsx --test tests/documents.test.mjs",

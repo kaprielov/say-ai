@@ -41,6 +41,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run db:migrate` | Apply pending migrations. |
 | `npm run db:rollback` | Undo the latest migration; the initial rollback deletes application tables and their data. |
 | `npm run db:check` | Check connection, pgvector, and application tables. |
+| `npm run pilot:status` | Read aggregate worker-lock, Telegram backlog, delivery retry, and ingestion status without provider or Telegram calls. |
 | `npm run test:db` | Verify schema constraints and vector retrieval against the migrated database. Fixtures are rolled back. |
 | `npm run test:api` | Test authentication, validation, persistence, owner isolation, and atomic creation in a temporary database. Requires database creation permission, available with the local Compose user. |
 | `npm run test:documents` | Test document extraction capacity, cancellation, and cleanup without database or provider calls. |
@@ -53,6 +54,34 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run test:replacement` | Test content replacement through the API, concurrent submissions, version switching, failure recovery, and old-version availability. Uses a temporary database and controlled providers. |
 
 Compose stores database files in a named volume. Normal stops and restarts preserve it. Run migrations explicitly; application startup does not modify the schema.
+
+## Pilot operator check
+
+Run `npm run pilot:status` against the intended `DATABASE_URL` for a read-only JSON
+snapshot. It reports worker advisory-lock presence in that database, pending/due/
+deferred Telegram updates and outgoing messages, retry counts, and ingestion task
+counts including recent failures. The command requires the migrated schema and
+selects no message payloads, source text, owner identifiers, or credentials.
+Connection/schema failures produce a sanitized diagnostic and exit code 1.
+Exit code 0 means the snapshot was collected, not that the pilot is healthy.
+
+Worker locks indicate a session holds the worker lock, not a heartbeat or proof of
+progress. Missing locks may be intentional when workers are disabled. Compare
+successive snapshots to investigate accumulating work; this is not an automatic
+alert or a throughput measurement. `oldest_due_seconds` measures time since the
+earliest current `available_at` among due rows. Retries reset that timestamp, so it
+does not measure the original Telegram arrival/delivery age. `due` also does not
+guarantee eligibility: per-bot/chat ordering can hold work behind a deferred retry.
+An empty due queue has a null age. Ingestion's `oldest_unfinished_seconds` measures
+time since submission, including scheduled retry waits. Failed ingestion counts
+include historical failed submissions even if a later replacement succeeded.
+
+See [the first-user pilot plan](docs/plans/first-user-pilot.md) for launch checks
+and remaining diagnostic gaps. The focused check runs with:
+
+```sh
+node --env-file-if-exists=.env --test tests/pilot-status.test.mjs
+```
 
 ## Knowledge-base API
 

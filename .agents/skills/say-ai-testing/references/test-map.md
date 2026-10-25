@@ -17,6 +17,7 @@ run every listed suite for every edit in a directory.
 | Database constraints or migrations | `npm run test:db` plus affected DB-backed suites; verify migrations on a disposable database |
 | HTTP admission or webhook concurrency/address resolution | `npm run test:server-limits`; add Telegram/API cases when their wiring changes |
 | Public development launcher | `npm run test:dev-public` |
+| Pilot operator snapshot | `node --env-file-if-exists=.env --test tests/pilot-status.test.mjs`; disposable PostgreSQL checks for aggregate backlog, worker locks, read-only collection, and sanitized CLI failure |
 | Copy, documentation, formatting only | Review meaning, links, localization, and supported translations; no new wording-only tests |
 
 ## Current environment limitations
