@@ -10,6 +10,7 @@ export class IngestionProcessor {
     private readonly embedder: Embedder,
     private readonly retryDelaysMs: readonly [number, number] = [10_000, 60_000],
     private readonly ownerEmbedder?: (owner: string) => Promise<Embedder>,
+    private readonly onProgress?: () => Promise<void>,
   ) {}
 
   private async transaction<T>(work: () => Promise<T>): Promise<T> {
@@ -116,6 +117,7 @@ export class IngestionProcessor {
             `, [task.version_id, offset + index, chunk.text, chunk.tokenCount, this.embedder.dimensions, JSON.stringify(vectors[index])]);
           }
         });
+        await this.onProgress?.();
       }
       attemptSignal.throwIfAborted();
       await this.transaction(async () => {

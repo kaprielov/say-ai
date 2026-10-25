@@ -11,6 +11,8 @@ import { IngestionError, OpenAIEmbedder } from '../src/ingestion/embeddings.ts';
 import { IngestionProcessor } from '../src/ingestion/processor.ts';
 import { startIngestionWorker } from '../src/ingestion/worker.ts';
 import { createApp } from '../src/app.ts';
+import { pilotStatus } from '../scripts/pilot-status.mjs';
+import { WorkerProgress } from '../src/worker-progress.ts';
 
 const databaseName = `say_ai_ingestion_test_${randomBytes(8).toString('hex')}`;
 const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -355,20 +357,58 @@ test('worker rejects a second instance, cancels on shutdown, and recovers interr
   }), () => { fatal = true; });
   try {
     await waitUntil(async () => (await taskState(taskId)).status === 'processing');
+    assert.equal((await pilotStatus(pool)).workers.ingestion.status, 'working');
+    // Freeze the real worker inside the controlled provider, leaving its lock
+    // and database connection live. A timer must not disguise this as progress.
+    await pool.query("UPDATE worker_progress SET last_progress_at=clock_timestamp()-interval '6 minutes' WHERE name='ingestion'");
+    const stalled = await pilotStatus(pool);
+    assert.equal(stalled.workers.ingestion_lock_held, true);
+    assert.equal(stalled.workers.ingestion.status, 'stalled');
+    const healthServer = createApp({ pool, apiKey: 'key'.repeat(20), ownerId: 'test-owner' }).listen(0, '127.0.0.1');
+    try {
+      await once(healthServer, 'listening');
+      const health = await fetch(`http://127.0.0.1:${healthServer.address().port}/health`);
+      assert.equal(health.status, 200);
+      assert.equal((await health.json()).status, 'ok');
+    } finally { await new Promise(resolve => healthServer.close(resolve)); }
     await assert.rejects(startIngestionWorker(pool, fakeEmbedder(), () => {}), /Another ingestion worker/);
   } finally {
     await first.stop();
   }
   assert.equal(fatal, false);
   assert.equal((await taskState(taskId)).status, 'processing');
+  assert.equal((await pilotStatus(pool)).workers.ingestion.status, 'missing');
   const second = await startIngestionWorker(pool, fakeEmbedder(), () => { fatal = true; });
   try {
     await waitUntil(async () => (await taskState(taskId)).status === 'ready');
+    assert.equal((await pilotStatus(pool)).workers.ingestion.status, 'idle');
     assert.equal((await taskState(taskId)).attempts_started, 2);
   } finally {
     await second.stop();
   }
   assert.equal(fatal, false);
+});
+
+test('worker progress writes are bounded and only explicit processing progress refreshes a stale worker', async t => {
+  let elapsed = 0;
+  t.mock.method(performance, 'now', () => elapsed);
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock(1792627200,1)');
+    const progress = new WorkerProgress(db, 'ingestion');
+    await progress.record();
+    assert.equal((await pilotStatus(db)).workers.ingestion.status, 'idle');
+    await db.query("UPDATE worker_progress SET last_progress_at=clock_timestamp()-interval '6 minutes' WHERE name='ingestion'");
+    elapsed = 9999;
+    await progress.record();
+    assert.equal((await pilotStatus(db)).workers.ingestion.status, 'unresponsive');
+    elapsed = 300_000;
+    // Time passing alone must not produce a fresh heartbeat.
+    assert.equal((await pilotStatus(db)).workers.ingestion.status, 'unresponsive');
+    await progress.record();
+    assert.equal((await pilotStatus(db)).workers.ingestion.status, 'idle');
+  } finally { await db.query('ROLLBACK'); db.release(); }
 });
 
 test('loss of the worker database connection reports a fatal failure and releases the lock', async () => {

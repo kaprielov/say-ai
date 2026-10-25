@@ -15,6 +15,7 @@ import { processUpdate, processOutbox, notifyIngestion, notifySecurity, cleanupT
 import { ownerAdmission, protectionSettings, visitorAdmission } from '../src/telegram/protection.ts';
 import { helpSummaries } from '../src/telegram/manager-ui.ts';
 import { translator } from '../src/telegram/i18n.ts';
+import { pilotStatus } from '../scripts/pilot-status.mjs';
 
 const databaseName = `say_ai_telegram_test_${randomBytes(8).toString('hex')}`;
 const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -256,6 +257,10 @@ test('a transient failure rolls back accepted content and retries without duplic
 test('worker registers Telegram hooks, enforces one worker, and releases its lock on shutdown', async () => {
   const worker = await startTelegramWorker(service, () => assert.fail('Worker failed'));
   try {
+    const status = await pilotStatus(pool);
+    assert.equal(status.workers.telegram_lock_held, true);
+    assert.ok(status.workers.telegram.progress_age_seconds < 30);
+    assert.ok(['idle', 'working'].includes(status.workers.telegram.status));
     assert.ok(calls.some(call => call.method === 'setWebhook' && call.payload.url === 'https://example.com/telegram/webhook/100' && call.payload.allowed_updates.includes('managed_bot')));
     await assert.rejects(startTelegramWorker(service, () => {}), /Another Telegram worker/);
   } finally { await worker.stop(); }

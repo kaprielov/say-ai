@@ -2,6 +2,7 @@ import { setTimeout } from 'node:timers/promises';
 import type { Pool } from 'pg';
 import { IngestionProcessor } from './processor.js';
 import type { Embedder } from './embeddings.js';
+import { WorkerProgress } from '../worker-progress.js';
 
 export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void, ownerEmbedder?: (owner: string) => Promise<Embedder>) {
   const client = await pool.connect();
@@ -13,10 +14,12 @@ export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFai
   };
   client.on('error', handleConnectionError);
   let locked = false;
+  const progress = new WorkerProgress(client, 'ingestion');
   try {
     const result = await client.query('SELECT pg_try_advisory_lock(1792627200, 1) AS locked');
     locked = result.rows[0].locked;
     if (!locked) throw new Error('Another ingestion worker is already running. Use one application instance.');
+    await progress.record();
     await new IngestionProcessor(client, embedder).recover();
   } catch (error) {
     client.removeListener('error', handleConnectionError);
@@ -24,11 +27,12 @@ export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFai
     throw error;
   }
 
-  const processor = new IngestionProcessor(client, embedder, undefined, ownerEmbedder);
+  const processor = new IngestionProcessor(client, embedder, undefined, ownerEmbedder, () => progress.record());
   const running = (async () => {
     try {
       while (!controller.signal.aborted) {
         const processed = await processor.processNext(controller.signal);
+        await progress.record();
         if (!processed) await setTimeout(1000, undefined, { signal: controller.signal });
       }
     } catch {

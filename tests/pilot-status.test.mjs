@@ -47,7 +47,7 @@ test('operator snapshot exposes backlog and retry delay without content and perf
     assert.equal(status.ingestion.processing, 0);
     assert.equal(status.ingestion.failed, 1);
     assert.equal(status.ingestion.failed_last_24_hours, 1);
-    assert.doesNotMatch(JSON.stringify(status), /private-|101|provider_unavailable/);
+    assert.doesNotMatch(JSON.stringify(status), /private-|provider_unavailable|"bot_id"|"owner_id"/);
   } finally { await db.query('ROLLBACK'); db.release(); }
 });
 
@@ -76,4 +76,50 @@ test('CLI fails with a sanitized diagnostic instead of a connection string', asy
   assert.equal(result.stdout, '');
   assert.equal(JSON.parse(result.stderr).error, 'pilot_status_unavailable');
   assert.doesNotMatch(result.stderr, /private-|postgresql|stack/);
+});
+
+test('stopped, idle, deferred, stalled and resumed workers are distinguishable while the database stays available', async () => {
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    await db.query("INSERT INTO telegram_updates(bot_id,update_id,payload,available_at) VALUES (202,1,'{}',now()+interval '1 hour')");
+    assert.equal((await pilotStatus(db)).workers.telegram.status, 'stopped');
+    await db.query('SELECT pg_advisory_lock(1792627200,2)');
+    assert.equal((await pilotStatus(db)).workers.telegram.status, 'unknown');
+    await db.query(`INSERT INTO worker_progress(name,backend_pid,backend_start,last_progress_at)
+      SELECT 'telegram',pid,backend_start,clock_timestamp() FROM pg_stat_activity WHERE pid=pg_backend_pid()`);
+    assert.equal((await pilotStatus(db)).workers.telegram.status, 'idle');
+    await db.query("UPDATE worker_progress SET backend_start=backend_start-interval '1 second' WHERE name='telegram'");
+    assert.equal((await pilotStatus(db)).workers.telegram.status, 'unknown');
+    await db.query("UPDATE worker_progress SET backend_start=(SELECT backend_start FROM pg_stat_activity WHERE pid=pg_backend_pid()) WHERE name='telegram'");
+    await db.query("UPDATE telegram_updates SET available_at=now()-interval '1 minute' WHERE bot_id=202");
+    assert.equal((await pilotStatus(db)).workers.telegram.status, 'working');
+    await db.query("UPDATE worker_progress SET last_progress_at=now()-interval '6 minutes' WHERE name='telegram'");
+    assert.equal((await db.query('SELECT 1 AS healthy')).rows[0].healthy, 1);
+    const stalled = await pilotStatus(db);
+    assert.equal(stalled.workers.telegram_lock_held, true);
+    assert.equal(stalled.workers.telegram.status, 'stalled');
+    assert.ok(stalled.workers.telegram.progress_age_seconds >= 360);
+    assert.equal(stalled.attention_required, true);
+    await db.query("UPDATE worker_progress SET last_progress_at=clock_timestamp() WHERE name='telegram'");
+    const resumed = await pilotStatus(db);
+    assert.equal(resumed.workers.telegram.status, 'working');
+    assert.equal(resumed.attention_required, false);
+    await db.query('SELECT pg_advisory_unlock_all()');
+    const missing = await pilotStatus(db);
+    assert.equal(missing.workers.telegram.status, 'missing');
+    assert.equal(missing.attention_required, true);
+  } finally { await db.query('ROLLBACK'); await db.query('SELECT pg_advisory_unlock_all()'); db.release(); }
+});
+
+test('progress migration rolls back and reapplies without changing queued work', async () => {
+  const env = { ...process.env, DATABASE_URL: pool.options.connectionString };
+  await pool.query("INSERT INTO telegram_updates(bot_id,update_id,payload) VALUES (303,1,'{}')");
+  try {
+    await exec(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', 'down', '1', '--no-verbose'], { env });
+    assert.equal((await pool.query("SELECT to_regclass('worker_progress') AS name")).rows[0].name, null);
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_updates WHERE bot_id=303')).rows[0].count, 1);
+    await exec(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', 'up', '--no-verbose'], { env });
+    assert.equal((await pilotStatus(pool)).workers.telegram.status, 'missing');
+  } finally { await pool.query('DELETE FROM telegram_updates WHERE bot_id=303'); }
 });

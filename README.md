@@ -65,10 +65,36 @@ selects no message payloads, source text, owner identifiers, or credentials.
 Connection/schema failures produce a sanitized diagnostic and exit code 1.
 Exit code 0 means the snapshot was collected, not that the pilot is healthy.
 
-Worker locks indicate a session holds the worker lock, not a heartbeat or proof of
-progress. Missing locks may be intentional when workers are disabled. Compare
-successive snapshots to investigate accumulating work; this is not an automatic
-alert or a throughput measurement. `oldest_due_seconds` measures time since the
+Apply the worker-progress migration with `npm run db:migrate` before starting the
+updated application. Workers record startup and actual loop progress in the DB,
+at most once per ten seconds. Ingestion also records progress after committed
+embedding batches, so a long document does not look stalled while batches advance.
+There is no independent heartbeat timer that can hide a frozen processing loop.
+Progress is matched to the current lock holder's database PID and session start;
+an old process's record is not accepted as the new worker's progress.
+
+Each worker reports `progress_age_seconds` and a status:
+
+| Status | Meaning |
+| --- | --- |
+| `stopped` | No lock and no currently due/processing work. This can be intentional. |
+| `missing` | Work exists, but no worker holds the lock. |
+| `unknown` | A lock exists without a matching progress record; check the running version and DB permissions. |
+| `idle` | Fresh progress; no currently due/processing work. Future retries are excluded. |
+| `working` | Fresh progress with work present. This does not guarantee every queued item advances. |
+| `stalled` | Work exists and no progress has been recorded for over five minutes. Investigate a suspected stall. |
+| `unresponsive` | Progress is over five minutes old even though no due work is visible. |
+
+`attention_required` is true for `missing`, `unknown`, `stalled`, or `unresponsive`.
+The fixed conservative threshold is reported as `stale_after_seconds: 300`; a
+fresh worker may still be slow or fail to answer. No restart or external notification
+is triggered, and CLI exit code 0 still means the report was collected successfully.
+The read-only command itself never refreshes progress. Workers need write access
+to `worker_progress`; diagnostic queries should run under the same DB role as the
+application (or a role with access to its session metadata).
+
+Compare successive snapshots to investigate accumulating work; this is not a
+throughput measurement. `oldest_due_seconds` measures time since the
 earliest current `available_at` among due rows. Retries reset that timestamp, so it
 does not measure the original Telegram arrival/delivery age. `due` also does not
 guarantee eligibility: per-bot/chat ordering can hold work behind a deferred retry.

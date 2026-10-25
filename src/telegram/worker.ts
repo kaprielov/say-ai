@@ -5,6 +5,7 @@ import { TelegramError, decryptToken } from './client.js';
 import type { TelegramService, Update } from './service.js';
 import { protectionSettings } from './protection.js';
 import { webhookDelivery } from './webhook-delivery.js';
+import { WorkerProgress } from '../worker-progress.js';
 
 export async function processUpdate(service: TelegramService, db: PoolClient) {
   await db.query('BEGIN');
@@ -185,9 +186,11 @@ export async function startTelegramWorker(service: TelegramService, onFailure: (
   let failed = false;
   const onError = () => { failed = true; controller.abort(); };
   db.on('error', onError);
+  const progress = new WorkerProgress(db, 'telegram');
   try {
     const result = await db.query('SELECT pg_try_advisory_lock(1792627200, 2) AS locked');
     if (!result.rows[0].locked) throw new Error('Another Telegram worker is running.');
+    await progress.record();
     const me = await service.api.call<{ id: number }>(service.config.token, 'getMe');
     if (String(me.id) !== service.config.managerId) throw new Error('Manager identity mismatch.');
     await refreshWebhooks(service, db);
@@ -215,6 +218,7 @@ export async function startTelegramWorker(service: TelegramService, onFailure: (
           if (!(await processOutbox(service, db))) break;
           await setTimeout(50, undefined, { signal: controller.signal });
         }
+        await progress.record();
         await setTimeout(worked ? 50 : 250, undefined, { signal: controller.signal });
       }
     } catch {

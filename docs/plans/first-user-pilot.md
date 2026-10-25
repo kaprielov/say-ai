@@ -124,24 +124,28 @@ that workers are progressing, webhooks work, or answers are being delivered.
 - [x] Provide an initial read-only aggregate snapshot with `npm run pilot:status`:
   worker-lock presence, pending/due/deferred updates and deliveries, retries,
   current due age, and ingestion failures. Implemented on 2026-10-25.
-- [ ] Add or establish an operator check for worker progress, pending update/outbox
-  counts, oldest queued work, and failed ingestion.
+- [x] Add an operator check for stale worker progress, matched to the current lock
+  holder. Distinguish idle/deferred work, absent workers, and suspected stalls.
+- [ ] Add original arrival timestamps to measure oldest queued work independently
+  of retry scheduling; current counts and due-age observations are available.
 - [ ] Capture sanitized error codes and processing timings with correlation IDs
   sufficient to investigate a reported failure.
 - [ ] Distinguish provider errors, timeouts, capacity rejection, and delivery errors
   without recording credentials, source documents, or ordinary message contents.
-- [ ] Verify that an operator can detect stopped processing even when `/health`
-  continues to return a successful response.
+- [x] Verify with a controlled provider that an operator can detect stopped
+  processing even when `/health` continues to return a successful response.
 
 Completion evidence: a deliberate failure is visible and can be investigated.
 A full analytics platform or external tracing integration is unnecessary here.
 
-The initial snapshot does not complete this section. Worker locks do not establish
-progress, and Telegram tables currently have no separate arrival timestamp:
+This section is not complete. Loop progress and ingestion batch progress now
+update a bounded DB record; a five-minute gap is reported as a suspected stall
+when work is present, or as unresponsive when no due work is visible. No independent
+timer, automatic restart, or external notification is included. Telegram tables
+currently have no separate arrival timestamp:
 `oldest_due_seconds` is based on the current retry eligibility timestamp, not
-original queue age. Heartbeats/progress detection, correlation IDs, phase timings,
-sanitized runtime error reporting, and a deliberate stalled-worker check remain
-open. See [operator command details](../../README.md#pilot-operator-check).
+original queue age. Correlation IDs, phase timings, and sanitized runtime error
+reporting remain open. See [operator command details](../../README.md#pilot-operator-check).
 
 ## Pilot setup and expectations
 
@@ -203,6 +207,7 @@ mark planned or historical checks as newly completed.
 | --- | --- | --- | --- |
 | 2026-10-24 | Local build, DB check, deterministic suite | Build and DB check passed; 125 passed, 0 failed, 2 skipped | Real Telegram, current semantic quality, concurrency, and remote deployment remain unverified |
 | 2026-10-25 | Initial operator snapshot, `scripts/pilot-status.mjs` | Three focused checks passed in a disposable DB; local `npm run pilot:status` succeeded; build passed; final full suite: 139 passed, 0 failed, 3 live cases skipped (142 total) | Lock presence is not progress; due age is not arrival age; runtime error/timing diagnostics and live checks remain open |
+| 2026-10-25 | Worker progress and suspected-stall detection | Controlled ingestion stall retained its lock while `/health` returned 200; status detected the stall and a replacement worker restored fresh progress. Migration down/up preserved queued work in a disposable DB. Build passed; full suite: 142 passed, 0 failed, 3 live cases skipped (145 total) | Five-minute detection threshold; no automatic restart or notifications; original arrival age and runtime error/timing diagnostics remain open |
 
 The 2026-10-25 full-suite runs initially exposed a pre-existing clock-dependent
 Telegram assertion: the database clock was about 48 ms ahead of Node, making a
@@ -210,3 +215,7 @@ strict six-hour upper bound fail. Commit `319a6c4` compares the remaining interv
 using the database clock. All 38 Telegram cases passed after that test-only fix,
 followed by the successful full run above. No application moderation behavior was
 changed. The operator snapshot made no external calls or database writes.
+
+The worker-progress migration was also applied to the local development DB on
+2026-10-25. `npm run pilot:status` succeeded there with empty queues and both workers
+reported as stopped. Live workers were not started and webhooks were not changed.
