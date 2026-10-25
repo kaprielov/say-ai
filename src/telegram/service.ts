@@ -1,4 +1,5 @@
 import type { ImageRecognizer } from '../ingestion/image-recognition.js';
+import { catalogCards, type ListingSelection } from '../catalog/service.js';
 import { largestPhoto } from './uploads.js';
 import { UploadDrafts } from './uploads.js';
 import { loadDialogue, saveDialogue, type MemorySettings } from './memory.js';
@@ -567,6 +568,28 @@ export class TelegramService {
     finally { this.panels.delete(db); }
   }
 
+  private async clearProductDialogue(db: PoolClient, botId: string, user: number) {
+    await db.query("DELETE FROM telegram_dialogues WHERE bot_id=$1 AND user_id=$2 AND scope='visitor'", [botId, user]);
+    await db.query('UPDATE telegram_visitors SET last_hash=NULL,last_question_at=NULL WHERE bot_id=$1 AND user_id=$2', [botId, user]);
+  }
+
+  private async showCatalog(db: PoolClient, bot: Bot, user: number, page = 0) {
+    const t = await this.locale(db, user);
+    const rows = await catalogCards(db, bot.id, bot.owner_id, page);
+    if (!rows.length && page === 0) return false;
+    const items: [string,string][][] = rows.slice(0, 5).map(row => [[
+      `${[...row.title].slice(0, 48).join('')} · ${row.price_rub} ₽`, `listing:${row.external_id}`,
+    ]]);
+    const navigation: [string,string][] = [];
+    if (page > 0) navigation.push([t('Previous products'), `catalog:${page - 1}`]);
+    if (rows.length > 5) navigation.push([t('Next products'), `catalog:${page + 1}`]);
+    if (navigation.length) items.push(navigation);
+    await this.enqueue(db, bot.id, user,
+      (rows.some(row => row.is_test) ? t('Test catalog. Stock quantities are fictional.') + '\n\n' : '') +
+      t('Choose a product to ask about its price, sizes or availability.'), buttons(items));
+    return true;
+  }
+
   private async handleUpdate(db: PoolClient, botId: string, update: Update) {
     if (botId === this.config.managerId && update.managed_bot) {
       await this.managed(db, update.managed_bot);
@@ -581,14 +604,37 @@ export class TelegramService {
     if (botId !== this.config.managerId) {
       const bot = (await db.query<Bot>('SELECT * FROM telegram_bots WHERE id = $1', [botId])).rows[0];
       if (/^\/reset(?:@\w+)?(?:\s|$)/.test(message.text ?? '')) {
+        await db.query('DELETE FROM telegram_listing_selections WHERE bot_id=$1 AND user_id=$2', [botId, user.id]);
         await db.query('DELETE FROM telegram_dialogues WHERE bot_id=$1 AND user_id=$2', [botId, user.id]);
         await db.query('UPDATE telegram_visitors SET last_hash=NULL,last_question_at=NULL WHERE bot_id=$1 AND user_id=$2', [botId, user.id]);
         await this.enqueue(db, botId, user.id, t('Dialogue cleared. Your next question starts a new conversation.'));
+        if (bot?.enabled && bot.knowledge_base_id) await this.showCatalog(db, bot, user.id);
       } else if (!bot?.enabled || !bot.knowledge_base_id) {
         await this.enqueue(db, botId, user.id, t('This bot is currently paused.'));
-      } else if (message.text?.startsWith('/start')) {
-        await this.enqueue(db, botId, user.id, t('Ask me a question about the knowledge base. Use /reset to start a new conversation.'));
-      } else if (message.text) {
+      } else if ((!callback && /^\/start(?:@\w+)?(?:\s|$)/.test(message.text ?? '')) || /^catalog:\d{1,3}$/.test(callback?.data ?? '')) {
+        const page = callback ? Number(callback.data!.split(':')[1]) : 0;
+        if (await this.showCatalog(db, bot, user.id, page)) {
+          await db.query('DELETE FROM telegram_listing_selections WHERE bot_id=$1 AND user_id=$2', [botId, user.id]);
+          await this.clearProductDialogue(db, botId, user.id);
+        } else {
+          await this.enqueue(db, botId, user.id, t('Ask me a question about the knowledge base. Use /reset to start a new conversation.'));
+        }
+      } else if (/^listing:[A-Za-z0-9_-]{1,48}$/.test(callback?.data ?? '')) {
+        const externalId = callback!.data!.slice('listing:'.length);
+        const listing = (await db.query('SELECT title,price_rub,is_test FROM listings WHERE bot_id=$1 AND owner_id=$2 AND external_id=$3', [botId, bot.owner_id, externalId])).rows[0];
+        if (!listing) {
+          await this.enqueue(db, botId, user.id, t('This listing is unavailable. Choose another product with /start.'));
+          await this.showCatalog(db, bot, user.id);
+          return;
+        }
+        await db.query(`INSERT INTO telegram_listing_selections(bot_id,user_id,owner_id,external_id) VALUES ($1,$2,$3,$4)
+          ON CONFLICT(bot_id,user_id) DO UPDATE SET owner_id=$3,external_id=$4,updated_at=now()`, [botId,user.id,bot.owner_id,externalId]);
+        await this.clearProductDialogue(db, botId, user.id);
+        await this.enqueue(db, botId, user.id,
+          t('Selected product: {title}\nPrice: {price} RUB.\nAsk about sizes, measurements or availability.', { title: listing.title, price: String(listing.price_rub) }) +
+          (listing.is_test ? '\n\n' + t('Test catalog. Stock quantities are fictional.') : ''),
+          buttons([[[t('Choose another product'), 'catalog:0']]]));
+      } else if (!callback && message.text) {
         await this.answer(db, botId, user.id, bot.owner_id, bot.knowledge_base_id, message.text);
       }
       return;
@@ -825,6 +871,7 @@ export class TelegramService {
     if (!question.trim() || question.includes('\0') || question.length > 4096) throw new QueryError(400, 'invalid_question', t('Send a question between 1 and 4096 characters.'));
     if (!this.questions) throw new QueryError(503, 'querying_unavailable', t('Question answering is not configured.'));
     const bot = testing ? undefined : (await db.query<Bot>('SELECT * FROM telegram_bots WHERE id=$1 AND owner_id=$2', [botId, owner])).rows[0];
+    let listing: ListingSelection | undefined;
     const settings = protectionSettings(bot?.protection);
     if (!testing) {
       if (!bot?.enabled || !bot.knowledge_base_id) {
@@ -832,6 +879,11 @@ export class TelegramService {
         return;
       }
       kb = bot.knowledge_base_id;
+      const selected = (await db.query(`SELECT s.external_id FROM telegram_listing_selections s
+        JOIN listings l ON l.bot_id=s.bot_id AND l.external_id=s.external_id AND l.owner_id=s.owner_id
+        WHERE s.bot_id=$1 AND s.user_id=$2 AND s.owner_id=$3`, [botId,chat,owner])).rows[0];
+      if (selected) listing = { botId, externalId: selected.external_id, userId: chat };
+      else if (await this.showCatalog(db, bot, chat)) return;
       const admission = await visitorAdmission(db, botId, chat, question, settings);
       if (!admission.allowed) {
         if (admission.message) await this.enqueue(db, botId, chat, t(admission.message));
@@ -858,12 +910,12 @@ export class TelegramService {
       const memoryBot = bot ?? (run ? await this.bot(db, chat, run.target) : undefined);
       const scope = testing ? `test:${run?.revision === memoryBot?.answer_settings.published.id ? 'published' : 'draft'}` : 'visitor';
       const version = memoryBot ? (await db.query('SELECT active_version_id FROM knowledge_bases WHERE id=$1 AND owner_id=$2', [kb, owner])).rows[0]?.active_version_id : '';
-      const signature = `${memoryBot?.memory_epoch}:${kb}:${version}:${configuration?.revision}`;
+      const signature = `${memoryBot?.memory_epoch}:${kb}:${version}:${configuration?.revision}` + (listing ? `:listing:${listing.externalId}` : '');
       const history = memoryBot ? await loadDialogue(db, memoryBot.id, chat, scope, signature, memoryBot) : [];
-      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration ? { ...configuration, history, historyVersion: version } : undefined,
+      const result = await this.questions.ask(kb, owner, question, AbortSignal.timeout(30_000), configuration ? { ...configuration, history, historyVersion: version, ...(listing ? { listing } : {}) } : undefined,
         { purpose: testing ? 'testing' : 'answers', botId: testing ? run?.target : botId });
       const reply = result.outcome === 'answered' || result.outcome === 'redirected' ? result.answer! : t('I do not have that information. What would you like to know about the subject of this bot?');
-      await this.enqueue(db, botId, chat, reply);
+      await this.enqueue(db, botId, chat, reply, listing ? buttons([[[t('Choose another product'), 'catalog:0']]]) : undefined);
       if (memoryBot && result.topic !== 'off_topic') {
         await saveDialogue(db, memoryBot.id, chat, scope, signature, memoryBot, [...history, { question, answer: reply }]);
       }
@@ -915,7 +967,7 @@ export class TelegramService {
     const me = await this.api.call<User>(token, 'getMe');
     if (me.id !== event.bot.id) throw new Error('Managed bot identity mismatch.');
     const secret = existing?.webhook_secret ?? randomBytes(32).toString('base64url');
-    await this.api.call(token, 'setWebhook', { url: `${this.config.publicUrl}/telegram/webhook/${id}`, secret_token: secret, allowed_updates: ['message'], ...await webhookDelivery(this.config.publicUrl) });
+    await this.api.call(token, 'setWebhook', { url: `${this.config.publicUrl}/telegram/webhook/${id}`, secret_token: secret, allowed_updates: ['message', 'callback_query'], ...await webhookDelivery(this.config.publicUrl) });
     if (!sameOwner) {
       await this.api.call(this.config.token, 'setManagedBotAccessSettings', { user_id: event.bot.id, is_access_restricted: !enabled });
       // Do not deliver queued answers from a previous owner's knowledge base.

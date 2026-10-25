@@ -111,6 +111,48 @@ test('spending panels isolate owners, paginate bots, retain origin and distingui
 function callback(user, data) {
   return { update_id: ++sequence, callback_query: { id: `callback${sequence}`, from: { id: user }, data, message: { chat: { id: user, type: 'private' } } } };
 }
+
+test('customer catalog start, selection and switching keep products and visitor history isolated', async () => {
+  const owner = 870, visitor = 871, secondVisitor = 872;
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (870,'en')");
+  const kb = await makeBase(owner, 'Catalog store');
+  await ready(kb);
+  await managed(owner, 8700);
+  await managed(owner, 8701);
+  await pool.query(`UPDATE telegram_bots SET enabled=true,knowledge_base_id=$1,
+    protection='{"perMinute":30,"perDay":0,"duplicateSeconds":0}' WHERE id IN (8700,8701)`, [kb]);
+  await pool.query("INSERT INTO telegram_owner_limits(owner_id,daily) VALUES ('telegram:870',0)");
+  await pool.query(`INSERT INTO listings(bot_id,owner_id,external_id,title,source_url,price_rub,details,captured_on,is_test)
+    VALUES (8700,'telegram:870','wide','Wide jeans','https://example.com/wide',2349,'{}',current_date,true),
+           (8700,'telegram:870','flare','Flared jeans','https://example.com/flare',2390,'{}',current_date,true),
+           (8701,'telegram:870','private','Other bot product','https://example.com/other',100,'{}',current_date,true)`);
+  const latest = async () => (await pool.query("SELECT payload FROM telegram_outbox WHERE bot_id=8700 AND payload->>'chat_id'=$1 AND method='sendMessage' ORDER BY id DESC LIMIT 1", [String(visitor)])).rows[0].payload;
+  const before = answers.length;
+  await deliver(message(visitor, '/start'), '8700');
+  let panel = await latest();
+  assert.deepEqual(new Set(panel.reply_markup.inline_keyboard.flat().map(b => b.callback_data)), new Set(['listing:wide', 'listing:flare']));
+  assert.match(panel.text, /Тестовый каталог/);
+  await deliver(message(visitor, 'Any M left?'), '8700');
+  assert.equal(answers.length, before, 'Selecting a product is required before a paid answer');
+  await deliver(callback(visitor, 'listing:private'), '8700');
+  assert.equal((await pool.query('SELECT count(*)::int n FROM telegram_listing_selections WHERE bot_id=8700')).rows[0].n, 0);
+  await deliver(callback(visitor, 'listing:wide'), '8700');
+  panel = await latest();
+  assert.match(panel.text, /Wide jeans/);
+  await deliver(message(visitor, 'Any M left?'), '8700');
+  assert.deepEqual(answerRuns.at(-1).listing, { botId: '8700', externalId: 'wide', userId: visitor });
+  await deliver(callback(secondVisitor, 'listing:flare'), '8700');
+  await deliver(callback(visitor, 'listing:flare'), '8700');
+  await deliver(message(visitor, 'Any M left?'), '8700');
+  assert.equal(answerRuns.at(-1).listing.externalId, 'flare');
+  assert.deepEqual(answerRuns.at(-1).history, []);
+  await deliver(message(visitor, '/reset'), '8700');
+  assert.equal((await pool.query('SELECT count(*)::int n FROM telegram_listing_selections WHERE bot_id=8700 AND user_id=$1', [visitor])).rows[0].n, 0);
+  assert.equal((await pool.query('SELECT count(*)::int n FROM telegram_listing_selections WHERE bot_id=8700 AND user_id=$1', [secondVisitor])).rows[0].n, 1);
+  await pool.query("UPDATE telegram_bots SET enabled=false WHERE id=8700");
+  await deliver(callback(visitor, 'listing:wide'), '8700');
+  assert.equal((await pool.query('SELECT count(*)::int n FROM telegram_listing_selections WHERE bot_id=8700 AND user_id=$1', [visitor])).rows[0].n, 0);
+});
 async function deliver(update, botId = '100') {
   await pool.query('INSERT INTO telegram_updates (bot_id, update_id, payload) VALUES ($1, $2, $3)', [botId, update.update_id, update]);
   assert.equal(await processUpdate(service, db), true);
@@ -352,6 +394,7 @@ test('a new public URL refreshes all bot hooks, preserves secrets, and skips rev
     const call = refreshed.find(call => call.payload.url.endsWith(`/telegram/webhook/${bot.id}`));
     assert.ok(call); assert.equal(call.payload.secret_token, bot.webhook_secret);
     assert.ok(call.payload.url.startsWith('https://new-tunnel.trycloudflare.com/'));
+    assert.ok(call.payload.allowed_updates.includes('callback_query'));
   }
   assert.equal((await pool.query('SELECT enabled FROM telegram_bots WHERE id = $1', [revoked.id])).rows[0].enabled, false);
 });

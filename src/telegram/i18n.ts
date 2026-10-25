@@ -4,6 +4,13 @@ export type Language = 'en' | 'ru';
 
 // Keep manager copy available in every supported interface language.
 const russian: Record<string, string> = {
+  "Test catalog. Stock quantities are fictional.": "Тестовый каталог. Остатки вымышленные.",
+  "Choose a product to ask about its price, sizes or availability.": "Выберите товар, чтобы спросить о цене, размерах или наличии.",
+  "Previous products": "Предыдущие товары",
+  "Next products": "Следующие товары",
+  "Choose another product": "Выбрать другой товар",
+  "Selected product: {title}\nPrice: {price} RUB.\nAsk about sizes, measurements or availability.": "Выбран товар: {title}\nЦена: {price} ₽.\nСпросите о размерах, замерах или наличии.",
+  "This listing is unavailable. Choose another product with /start.": "Это объявление недоступно. Выберите другой товар через /start.",
   "Send up to 10 files, together or separately, then tap Done. Each file: 20 MB; total files: 50 MB; extracted text: 5 MiB. JPEG, PNG, and WebP images are recognized using your OpenAI key. Send small text as a file for better quality. Scanned PDFs still require OCR.": "Отправьте до 10 файлов вместе или по очереди, затем нажмите «Готово». Каждый файл — до 20 МБ, все файлы — до 50 МБ, извлечённый текст — до 5 МиБ. Картинки JPEG, PNG и WebP распознаются с вашим ключом OpenAI. Мелкий текст лучше отправлять файлом. Сканы PDF нужно предварительно распознать.",
   "Unable to read image. Use a static JPEG, PNG, or WebP image up to 25 megapixels.": "Не удалось прочитать картинку. Отправьте статичную картинку JPEG, PNG или WebP до 25 мегапикселей.",
   "Image processing is busy. Try again later.": "Сейчас обрабатывается слишком много картинок. Попробуйте позже.",

@@ -112,6 +112,39 @@ node --env-file-if-exists=.env --test tests/pilot-status.test.mjs
 
 ## Knowledge-base API
 
+### Pilot listing catalog storage
+
+`npm run db:migrate` creates `listings`, `listing_variants`, and
+`telegram_listing_selections`. If the optional manual `test_catalog` snapshot
+exists, migration `1793577600000_listing_catalog` copies its records into the
+public tables, preserving stock and measurements. The original schema remains a
+backup; edit current stock in `public.listing_variants`. The manual SQL fixture
+in `scripts/fixtures/avito-test-catalog.sql` only populates that backup schema and
+must not be used to update the public catalog after migration.
+
+Listings belong to a bot and its owner. Bot transfer deletes its previous catalog
+and selections. Synthetic stock and test listings have explicit flags. Measurement
+values are centimeters; `half_waist` and `half_hips` are flat half measurements,
+not circumferences. Reference charts do not imply that a color is available.
+
+Enabled customer bots with a catalog show product buttons after `/start`. Choosing
+a product binds it to that bot and visitor. `/start`, `/reset`, and **Choose another
+product** clear the selection and visitor history; selecting a product starts a
+fresh product dialogue. Bots without a catalog keep the knowledge-base flow.
+Child webhooks must include `callback_query`; application startup refreshes them.
+
+Before each product answer, the query pipeline checks the current bot, owner,
+knowledge-base binding, and visitor selection, then reads price, variants, stock,
+and measurements from the public catalog. It uses only that selected listing as
+evidence, avoiding unrelated knowledge-base products and embedding retrieval.
+Existing dialogue limits, answer settings, provider accounting, quotas, and safety
+validation still apply. Catalog evidence is capped at 50 variants and 3000 tokens;
+oversized records fail without a provider request. The bot labels test stock as
+fictional. Product photos are not yet displayed in Telegram cards.
+
+Rolling this migration back drops the public catalog and selections, including
+edits made after import; the manual snapshot remains.
+
 Send `Authorization: Bearer <DEVELOPER_API_KEY>` to all knowledge-base endpoints. The server maps this key to `DEVELOPER_OWNER_ID`; request body fields cannot override ownership. Missing or invalid keys return `401`. `/health` remains public.
 
 ### Create

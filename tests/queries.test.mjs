@@ -88,6 +88,42 @@ function service(options = {}) {
   });
 }
 
+test('selected listing evidence refreshes stock, keeps size charts together and suppresses unauthorized paid calls', async () => {
+  const { kbId: kb } = await readyKnowledgeBase();
+  await pool.query(`INSERT INTO telegram_bots(id,owner_id,username,knowledge_base_id,token_ciphertext,webhook_secret,enabled)
+    VALUES (900,$1,'catalogbot',$2,'fixture','fixture',true)`, [ownerId,kb]);
+  await pool.query(`INSERT INTO listings(bot_id,owner_id,external_id,title,source_url,price_rub,details,captured_on,is_test)
+    VALUES (900,$1,'wide','Wide jeans','https://example.com/wide',2349,'{"brand_field":"Zara"}',current_date,true)`, [ownerId]);
+  await pool.query(`INSERT INTO listing_variants(bot_id,external_id,color,size,stock,stock_is_synthetic,measurements_cm)
+    VALUES (900,'wide','black','M',2,true,'{"half_waist":40,"length":111,"leg_opening_width":30}')`);
+  await pool.query(`INSERT INTO telegram_listing_selections(bot_id,user_id,owner_id,external_id) VALUES (900,901,$1,'wide')`, [ownerId]);
+  let calls = 0;
+  const contexts = [];
+  const qa = service({ embedder: () => ({ embed: async () => { throw new Error('Catalog queries must not retrieve unrelated knowledge'); } }),
+    answerer: { async answer(_question,context) {
+      calls++; contexts.push(context);
+      return { outcome:'answered',answer:'A controlled answer.',chunk_ids:[context[0].id] };
+    } } });
+  const run = { settings:{instructions:'',detail:'standard',language:'auto',retrieval:'focused'},revision:'catalog-test',
+    listing:{botId:'900',externalId:'wide',userId:901} };
+  await qa.ask(kb,ownerId,'Is M available?',new AbortController().signal,run);
+  let evidence = JSON.parse(contexts.at(-1)[0].text);
+  assert.equal(evidence.variants[0].stock,2);
+  assert.equal(evidence.variants[0].measurements_cm.half_waist,40);
+  assert.equal(evidence.measurement_units,'cm');
+  assert.equal(evidence.is_test,true);
+  assert.equal(contexts.at(-1).length,1);
+  await pool.query("UPDATE listing_variants SET stock=0 WHERE bot_id=900 AND size='M'");
+  await qa.ask(kb,ownerId,'Still available?',new AbortController().signal,run);
+  evidence = JSON.parse(contexts.at(-1)[0].text);
+  assert.equal(evidence.variants[0].stock,0);
+  await assert.rejects(qa.ask(kb,ownerId,'Is M available?',new AbortController().signal,
+    {...run,listing:{...run.listing,userId:902}}), {code:'listing_unavailable'});
+  await pool.query("UPDATE telegram_bots SET enabled=false WHERE id=900");
+  await assert.rejects(qa.ask(kb,ownerId,'Is M available?',new AbortController().signal,run), {code:'listing_unavailable'});
+  assert.equal(calls,2);
+});
+
 async function startApp(questions = service()) {
   const server = createApp({ pool, apiKey, ownerId, questions }).listen(0, '127.0.0.1');
   servers.push(server);

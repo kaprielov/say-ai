@@ -1,4 +1,5 @@
 import { hasOnlyEvidenceLinks, topics, type AnswerSafety, type QuestionTopic } from './safety.js';
+import { listingEvidence, type ListingSelection } from '../catalog/service.js';
 import { validateBotSettings, type BotAnswerSettings } from '../bots/settings.js';
 import { answerRequest } from './answerer.js';
 import type { Pool } from 'pg';
@@ -25,7 +26,7 @@ const refusal = () => ({ outcome: 'insufficient_context' as const, answer: null,
 export class QuestionAnswering {
   constructor(private readonly options: QueryOptions) {}
 
-  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean; history?: DialoguePair[]; historyVersion?: string }, spending?: Pick<SpendingContext, 'botId' | 'purpose'>) {
+  async ask(id: string, ownerId: string, question: string, disconnect: AbortSignal, run?: { settings: BotAnswerSettings; revision: string; inspect?: boolean; history?: DialoguePair[]; historyVersion?: string; listing?: ListingSelection }, spending?: Pick<SpendingContext, 'botId' | 'purpose'>) {
     const started = performance.now();
     const settings = run ? validateBotSettings(run.settings) : undefined;
     const selectedConfig = retrievalProfiles[settings?.retrieval ?? 'balanced'] ?? contextConfig;
@@ -68,6 +69,7 @@ export class QuestionAnswering {
       if (version.embedding_dimensions < 1 || version.embedding_dimensions > maxDimensions) {
         throw new QueryError(503, 'embedding_configuration_unavailable', 'The active version uses an unsupported embedding configuration.');
       }
+      const listing = run?.listing ? await call(() => listingEvidence(pool, ownerId, id, run.listing!)) : undefined;
       const providers = this.options.providers
         ? await call(() => this.options.providers!(ownerId, version.embedding_model, version.embedding_dimensions, { purpose: 'answers', ...spending, knowledgeBaseId: id }))
         : { embedder: embedder(version.embedding_model, version.embedding_dimensions), answerer, safety };
@@ -75,29 +77,35 @@ export class QuestionAnswering {
       if (history.length > 20 || countTokens(JSON.stringify(history)) > 6000) {
         throw new QueryError(400, 'invalid_history', 'Dialogue history exceeds the context limit.');
       }
-      const resolvedQuestion = history.length
+      const resolvedQuestion = history.length && !listing
         ? await call(() => {
           if (!providers.answerer.resolveQuestion) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
           return providers.answerer.resolveQuestion(question, history, signal);
         }) : question;
       if (countTokens(resolvedQuestion) > 1024) throw new QueryError(400, 'question_too_long', 'question must not exceed 4096 characters or 1024 tokens.');
-      const vectors = await call(() => providers.embedder.embed([resolvedQuestion], signal));
-      validateVectors(vectors, 1, version.embedding_dimensions);
-      const matches = await call(() => pool.query<PositionedChunk>(`
-        SELECT c.id, c.text, c.position
-        FROM chunks c JOIN content_versions v ON v.id = c.version_id
-        WHERE c.version_id = $2 AND v.knowledge_base_id = $3
-        ORDER BY c.embedding <=> $1::vector, c.position LIMIT $4
-      `, [JSON.stringify(vectors[0]), version.version_id, id, selectedConfig.candidates]));
-      const positions = [...new Set(matches.rows.slice(0, selectedConfig.seeds)
-        .flatMap(match => [match.position + 1, match.position - 1]).filter(position => position >= 0))];
-      const neighbors = positions.length ? await call(() => pool.query<PositionedChunk>(`
-        SELECT c.id, c.text, c.position
-        FROM chunks c JOIN content_versions v ON v.id = c.version_id
-        WHERE c.version_id = $1 AND v.knowledge_base_id = $2 AND c.position = ANY($3::int[])
-        ORDER BY c.position
-      `, [version.version_id, id, positions])) : { rows: [] };
-      const context = selectContext(matches.rows, neighbors.rows, selectedConfig);
+      let context: ContextChunk[];
+      if (listing) {
+        // Product questions use only the selected record, never another product's retrieved facts.
+        context = [listing];
+      } else {
+        const vectors = await call(() => providers.embedder.embed([resolvedQuestion], signal));
+        validateVectors(vectors, 1, version.embedding_dimensions);
+        const matches = await call(() => pool.query<PositionedChunk>(`
+          SELECT c.id, c.text, c.position
+          FROM chunks c JOIN content_versions v ON v.id = c.version_id
+          WHERE c.version_id = $2 AND v.knowledge_base_id = $3
+          ORDER BY c.embedding <=> $1::vector, c.position LIMIT $4
+        `, [JSON.stringify(vectors[0]), version.version_id, id, selectedConfig.candidates]));
+        const positions = [...new Set(matches.rows.slice(0, selectedConfig.seeds)
+          .flatMap(match => [match.position + 1, match.position - 1]).filter(position => position >= 0))];
+        const neighbors = positions.length ? await call(() => pool.query<PositionedChunk>(`
+          SELECT c.id, c.text, c.position
+          FROM chunks c JOIN content_versions v ON v.id = c.version_id
+          WHERE c.version_id = $1 AND v.knowledge_base_id = $2 AND c.position = ANY($3::int[])
+          ORDER BY c.position
+        `, [version.version_id, id, positions])) : { rows: [] };
+        context = selectContext(matches.rows, neighbors.rows, selectedConfig);
+      }
       check();
       let topic: QuestionTopic = 'uncertain';
       let review: 'disabled' | 'not_generated' | 'not_required' | 'blocked_links' | 'rejected' | 'supported' = 'not_generated';

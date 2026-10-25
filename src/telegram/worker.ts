@@ -174,7 +174,7 @@ export async function refreshWebhooks(service: TelegramService, db: PoolClient) 
     try {
       await service.api.call(decryptToken(bot.token_ciphertext, service.config.encryptionKey), 'setWebhook', {
         url: `${service.config.publicUrl}/telegram/webhook/${bot.id}`,
-        secret_token: bot.webhook_secret, allowed_updates: ['message'], ...delivery,
+        secret_token: bot.webhook_secret, allowed_updates: ['message', 'callback_query'], ...delivery,
       });
     } catch (error) {
       if (!(error instanceof TelegramError) || ![401, 403, 404].includes(error.code)) throw error;
