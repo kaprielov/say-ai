@@ -242,11 +242,13 @@ test('cancellation during recognition prevents saving evidence or creating a kno
 });
 
 test('image source migration rolls back and reapplies and refuses to discard unfinished image tasks',async()=>{
+  const rollbackCount=String((await pool.query(`SELECT count(*)::int AS n FROM pgmigrations
+    WHERE id >= (SELECT id FROM pgmigrations WHERE name='1793491200000_image_sources')`)).rows[0].n);
   const base=await transaction(pool,db=>createKnowledgeBase(db,'owner',{bytes:png,filename:'chart.png'}));
-  await assert.rejects(migrate('down','1'));
+  await assert.rejects(migrate('down',rollbackCount));
   assert.equal((await taskFor(base.id)).source_text,null);
   await processNext();
-  await migrate('down','1');assert.equal((await pool.query("SELECT to_regclass('image_sources') AS name")).rows[0].name,null);
+  await migrate('down',rollbackCount);assert.equal((await pool.query("SELECT to_regclass('image_sources') AS name")).rows[0].name,null);
   await migrate('up');assert.equal((await taskFor(base.id)).status,'ready');
 });
 

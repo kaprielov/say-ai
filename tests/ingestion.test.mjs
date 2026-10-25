@@ -34,7 +34,7 @@ before(async () => {
 });
 
 beforeEach(async () => {
-  await pool.query('TRUNCATE image_sources, upload_draft_items, upload_drafts, telegram_sessions, telegram_dialogues, telegram_visitors, telegram_security_notices, telegram_notifications, telegram_bots, chunks, content_versions, ingestion_tasks, knowledge_bases');
+  await pool.query('TRUNCATE telegram_listing_selections, listing_variants, listings, image_sources, upload_draft_items, upload_drafts, telegram_sessions, telegram_dialogues, telegram_visitors, telegram_security_notices, telegram_notifications, telegram_bots, chunks, content_versions, ingestion_tasks, knowledge_bases');
 });
 
 after(async () => {
