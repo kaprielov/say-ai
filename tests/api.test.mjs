@@ -220,8 +220,8 @@ test('upload validation rejects unsupported, binary, empty, oversized, and malfo
     ['binary\u0001data', 'binary.txt', 400, 'invalid_text'],
     [new Uint8Array([0xff, 0xfe, 0x41, 0x00]), 'utf16.txt', 400, 'invalid_file_encoding'],
     [new Uint8Array([0xc3, 0x28]), 'invalid.txt', 400, 'invalid_file_encoding'],
-    ['x'.repeat(1024 * 1024 + 1), 'large.txt', 413, 'payload_too_large'],
-    ['x'.repeat(2 * 1024 * 1024), 'larger.txt', 413, 'payload_too_large'],
+    ['x'.repeat(20_000_001), 'large.txt', 413, 'payload_too_large'],
+    ['x'.repeat(5 * 1024 * 1024 + 1), 'larger.txt', 413, 'extracted_text_too_large'],
   ]) {
     const response = await uploadFile(content, filename);
     assert.equal(response.status, status, filename);
@@ -248,12 +248,12 @@ test('upload validation rejects unsupported, binary, empty, oversized, and malfo
   assert.equal((await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count, before);
 });
 
-test('file byte limit accepts exactly 1 MiB and rejects oversized multibyte text', async () => {
-  const exact = await uploadFile('x'.repeat(1024 * 1024));
+test('text limit accepts exactly 5 MiB and rejects oversized multibyte text', async () => {
+  const exact = await uploadFile('x'.repeat(5 * 1024 * 1024));
   assert.equal(exact.status, 201);
   const kb = await exact.json();
-  assert.equal((await pool.query('SELECT octet_length(source_text) AS size FROM ingestion_tasks WHERE knowledge_base_id = $1', [kb.id])).rows[0].size, 1024 * 1024);
-  const multibyte = await uploadFile('\u00e9'.repeat(600_000));
+  assert.equal((await pool.query('SELECT octet_length(source_text) AS size FROM ingestion_tasks WHERE knowledge_base_id = $1', [kb.id])).rows[0].size, 5 * 1024 * 1024);
+  const multibyte = await uploadFile('\u00e9'.repeat(3_000_000));
   assert.equal(multibyte.status, 413);
 });
 
@@ -300,11 +300,44 @@ test('empty and damaged documents fail without persisting knowledge bases or par
 });
 
 test('compressed Word uploads cannot bypass the extracted text size limit', async () => {
-  const buffer = await docxFixture('x'.repeat(1024 * 1024 + 1));
+  const buffer = await docxFixture('x'.repeat(5 * 1024 * 1024 + 1));
   assert.ok(buffer.length < 1024 * 1024);
   const before = (await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count;
   const response = await uploadFile(buffer, 'compressed.docx');
   assert.equal(response.status, 413);
   assert.equal((await response.json()).error.code, 'extracted_text_too_large');
   assert.equal((await pool.query('SELECT count(*) FROM knowledge_bases')).rows[0].count, before);
+});
+
+test('multipart admission bounds simultaneous buffers and releases capacity after disconnect', async () => {
+  const { request } = await import('node:http');
+  const server = servers[0];
+  let observed = 0, ready;
+  const admitted = new Promise(resolve => { ready = resolve; });
+  const observe = req => { if (req.url.includes('slow-upload') && ++observed === 2) ready(); };
+  server.on('request', observe);
+  const requests = Array.from({ length: 2 }, () => {
+    const req = request(`${baseUrl}/knowledge-bases?slow-upload`, { method: 'POST', headers: {
+      Authorization: `Bearer ${key}`, 'Content-Type': 'multipart/form-data; boundary=slow',
+    } });
+    req.on('error', () => {});
+    req.write('--slow\r\nContent-Disposition: form-data; name="file"; filename="test.md"\r\nContent-Type: text/plain\r\n\r\nWaiting for data');
+    return req;
+  });
+  try {
+    await admitted;
+    const full = await uploadFile('text', 'file.md');
+    assert.equal(full.status, 429);
+    assert.equal((await full.json()).error.code, 'upload_capacity_full');
+  } finally {
+    server.removeListener('request', observe);
+    for (const req of requests) req.destroy();
+  }
+  // Wait for the server-side aborted parsers to finish before checking admission again.
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const response = await uploadFile('Capacity recovered.', 'file.md');
+    if (response.status !== 429) { assert.equal(response.status, 201); return; }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail('Upload capacity did not recover after disconnection');
 });

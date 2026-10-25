@@ -102,7 +102,7 @@ export function telegramRouter(service: TelegramService) {
       if (counts.total >= serverLimits.queued + (manager ? serverLimits.managerReserve : 0)
         || counts.bot >= (manager ? serverLimits.managerReserve : serverLimits.queuedPerBot)
         || (!manager && counts.owner >= serverLimits.queuedPerOwner)
-        || (sender !== null && counts.visitor >= serverLimits.queuedPerVisitor)
+        || (sender !== null && counts.visitor >= (manager ? serverLimits.queuedPerManagerUser : serverLimits.queuedPerVisitor))
         || outgoing >= serverLimits.outbox - 20) return false;
       await db.query(`INSERT INTO telegram_queue_turns(bot_id) VALUES ($1) ON CONFLICT DO NOTHING`, [botId]);
       await db.query(`INSERT INTO telegram_updates (bot_id, update_id, payload) VALUES ($1, $2, $3)

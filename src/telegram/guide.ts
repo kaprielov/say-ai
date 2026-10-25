@@ -9,7 +9,7 @@ Document processing and answers use your OpenAI API billing.`;
 export const managerHelp = {
   menu: `Manager help
 
-Create knowledge base — name a collection of information, then paste text or upload one file up to 1 MiB. Supported: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Scans need text recognition before uploading. You can have up to 20 knowledge bases. Processing runs in the background; you receive a notification when it finishes.
+Create knowledge base — name a collection of information, then send text or up to 10 files together or separately and tap Done. Each file may be up to 20 MB, with 50 MB of files and 5 MiB of extracted text per upload. Supported: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Scans need text recognition before uploading. You can have up to 20 knowledge bases. Processing runs in the background; you receive a notification when it finishes.
 
 My knowledge bases — open a base to check its status, test answers, update content, rename it, create a bot, or delete it.
 
@@ -36,7 +36,7 @@ Refresh status — check processing progress. Pending means queued; processing m
 
 Test answers — send questions here to check the base before sharing a bot. Each question uses your OpenAI API account and a separate configurable daily test allowance. Use /cancel to finish testing.
 
-Replace content — send a new file or text to replace the entire base, not append to it. Include everything you want to keep. The previous ready version remains available during processing. Connected bots use the new version once it is ready.
+Replace content — collect new files or text and tap Done to replace the entire base. The same upload limits apply. Include everything you want to keep. The previous ready version remains available during processing. Connected bots use the new version once it is ready.
 
 Rename — change the base's display name. Its content and bot connections stay the same. Names must contain 1 to 80 characters.
 
@@ -86,7 +86,7 @@ export const russianManagerIntroduction = `Создайте бота, котор
 export const russianManagerHelp: Record<HelpTopic, string> = {
   menu: `Справка по менеджеру
 
-Создать базу знаний — задайте название, затем отправьте текст или один файл до 1 МиБ. Форматы: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Текст сканов нужно распознать до загрузки. Можно создать до 20 баз знаний. Обработка идёт в фоне; вы получите уведомление о её завершении.
+Создать базу знаний — задайте название, затем отправьте текст или до 10 файлов вместе либо по очереди и нажмите «Готово». Каждый файл — до 20 МБ, все файлы — до 50 МБ, извлечённый текст — до 5 МиБ. Форматы: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Текст сканов нужно распознать до загрузки. Можно создать до 20 баз знаний. Обработка идёт в фоне; вы получите уведомление о её завершении.
 
 Мои базы знаний — откройте базу, чтобы проверить статус и ответы, обновить содержимое, изменить название, создать бота или удалить базу.
 
@@ -112,7 +112,7 @@ export const russianManagerHelp: Record<HelpTopic, string> = {
 
 Проверить ответы — задавайте вопросы здесь перед публикацией бота. Каждый вопрос использует ваш API-аккаунт OpenAI и отдельный настраиваемый дневной лимит тестирования. Команда /cancel завершает проверку.
 
-Заменить содержимое — отправьте новый файл или текст для полной замены базы, а не добавления к ней. Включите всё, что хотите сохранить. Во время обработки доступна предыдущая готовая версия. После завершения связанные боты начнут использовать новую версию.
+Заменить содержимое — отправьте новые файлы или текст и нажмите «Готово» для полной замены базы. Действуют те же ограничения загрузки. Включите всё, что хотите сохранить. Во время обработки доступна предыдущая готовая версия. После завершения связанные боты начнут использовать новую версию.
 
 Переименовать — измените название базы. Содержимое и связи с ботами сохраняются. Длина названия — от 1 до 80 символов.
 

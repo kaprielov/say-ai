@@ -1,3 +1,4 @@
+import { UploadDrafts } from './uploads.js';
 import { loadDialogue, saveDialogue, type MemorySettings } from './memory.js';
 import { BotSettings, type BotAnswerSettings, type SettingsState } from '../bots/settings.js';
 import type { OwnerCredentials } from '../providers/owner-openai.js';
@@ -10,8 +11,6 @@ import { managerHelp, managerIntroduction, type HelpTopic } from './guide.js';
 import { protectionGroups, protectionGroupFor, protectionHints, protectionPresets, helpSummaries, type ProtectionGroup } from './manager-ui.js';
 import { randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import { createKnowledgeBase, replaceKnowledgeBase } from '../knowledge-bases/service.js';
-import { decodeSource, sourceText } from '../ingestion/source.js';
 import { QueryError } from '../queries/errors.js';
 import type { QuestionAnswering } from '../queries/service.js';
 import { decryptToken, encryptToken, type TelegramTransport } from './client.js';
@@ -29,7 +28,7 @@ export type Update = {
   callback_query?: { id: string; from: User; message?: Message; data?: string };
   managed_bot?: { user: User; bot: User };
 };
-type Session = { language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null; tuning_bot_id?: string | null; tuning_version?: string | null; tuning_mode?: string | null; tuning_result?: { debug?: { revision: string; contentVersion: string; elapsedMs: number; safety?: { topic: string; review: string }; context: {id: string; text: string}[]; request: unknown } } | null };
+type Session = { upload_draft_id?: string | null; language: Language | null; state: string; knowledge_base_id: string | null; draft_name: string | null; tuning_bot_id?: string | null; tuning_version?: string | null; tuning_mode?: string | null; tuning_result?: { debug?: { revision: string; contentVersion: string; elapsedMs: number; safety?: { topic: string; review: string }; context: {id: string; text: string}[]; request: unknown } } | null };
 type Bot = MemorySettings & { id: string; owner_id: string; username: string; knowledge_base_id: string | null; token_ciphertext: string; webhook_secret: string; enabled: boolean; protection: Record<string, number>; answer_settings: SettingsState };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const safetyLabels: Record<string, string> = { related: 'Related question', social: 'Social message', missing_information: 'Related question without evidence', off_topic: 'Unrelated question', uncertain: 'Unclear question', not_generated: 'Not generated', not_required: 'Not required', blocked_links: 'Blocked by link policy', rejected: 'Not supported by evidence', supported: 'Passed evidence review', disabled: 'Model review disabled' };
@@ -38,6 +37,7 @@ const ownerId = (id: number) => `telegram:${id}`;
 const buttons = (rows: [string, string][][]) => ({ inline_keyboard: rows.map(row => row.map(([text, callback_data]) => ({ text, callback_data }))) });
 
 export class TelegramService {
+  readonly uploads = new UploadDrafts(this);
   private readonly botSettings = new BotSettings();
   private readonly panels = new WeakMap<PoolClient, { chat: number; message: number; used: boolean }>();
   constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>, readonly credentials?: OwnerCredentials) {}
@@ -113,7 +113,7 @@ export class TelegramService {
   async session(db: PoolClient, user: number, state: string, kb: string | null = null, name: string | null = null) {
     await db.query(`
       INSERT INTO telegram_sessions (user_id, state, knowledge_base_id, draft_name) VALUES ($1, $2, $3, $4)
-      ON CONFLICT (user_id) DO UPDATE SET state = $2, knowledge_base_id = $3, draft_name = $4, tuning_bot_id = NULL, tuning_version = NULL, tuning_mode = NULL, tuning_result = NULL, updated_at = now()
+      ON CONFLICT (user_id) DO UPDATE SET state = $2, knowledge_base_id = $3, draft_name = $4, tuning_bot_id = NULL, tuning_version = NULL, tuning_mode = NULL, tuning_result = NULL, upload_draft_id = NULL, updated_at = now()
     `, [user, state, kb, name]);
   }
 
@@ -148,7 +148,9 @@ export class TelegramService {
     const t = await this.locale(db, user);
     await this.session(db, user, 'menu');
     if (this.credentials && !(await this.credentials.available(ownerId(user)))) return this.keySettings(db, user);
+    const draft = (await db.query("SELECT id FROM upload_drafts WHERE user_id=$1 AND status IN ('collecting','queued','preparing') AND (expires_at>now() OR status<>'collecting')", [user])).rows[0];
     await this.enqueue(db, this.config.managerId, user, t('Manage your knowledge bases and Telegram bots.'), buttons([
+      ...(draft ? [[[t('Review upload'), `up:${draft.id}`]]] as [string,string][][] : []),
       [[t('My bots'), 'bots:0'], [t('My knowledge bases'), 'bases:0']],
       [[t('Create knowledge base'), 'new']], [[t('Settings'), 'settings'], [t('Help'), 'help:menu']],
     ]));
@@ -592,7 +594,12 @@ export class TelegramService {
     }
     if (command === '/start') return this.welcome(db, user.id);
     if (command === '/settings') return this.settings(db, user.id);
-    if ((command && ['/menu', '/cancel'].includes(command)) || callback?.data === 'menu') return this.menu(db, user.id);
+    if ((command && ['/menu', '/cancel'].includes(command)) || callback?.data === 'menu') {
+      if (command === '/cancel') {
+        await db.query("DELETE FROM upload_drafts WHERE user_id=$1 AND status='collecting'", [user.id]);
+      }
+      return this.menu(db, user.id);
+    }
     if (this.credentials) {
       if (command === '/openai' || callback?.data === 'openai') return this.keySettings(db, user.id);
       if (callback?.data === 'remove_key') {
@@ -606,6 +613,7 @@ export class TelegramService {
       if (!(await this.credentials.available(ownerId(user.id)))) return this.keySettings(db, user.id);
     }
     if (callback?.data) {
+      if (await this.uploads.action(db, user.id, callback.data)) return;
       if (await this.memoryAction(db, user.id, callback.data)) return;
       if (await this.botSettingsAction(db, user.id, callback.data)) return;
       if (await this.protectionAction(db, user.id, callback.data)) return;
@@ -642,31 +650,14 @@ export class TelegramService {
         await db.query('UPDATE knowledge_bases SET name = $1 WHERE id = $2 AND owner_id = $3', [text.trim(), session.knowledge_base_id, ownerId(user.id)]);
         return this.showBase(db, user.id, session.knowledge_base_id!);
       }
-      await this.session(db, user.id, 'upload', null, text.trim());
-      await this.enqueue(db, botId, user.id, t('Send text or a file up to 1 MiB. Scanned pages need text recognition first.'),
-        buttons([[[t('Supported files'), 'hf:base']], [[t('Back'), 'new'], [t('Main menu'), 'menu']]]));
-      return;
+      return this.uploads.start(db, user.id, text.trim());
     }
     if (session.state === 'upload' || session.state === 'replace') {
-      let content = text;
-      if (message.document) {
-        const file = message.document;
-        if ((file.file_size ?? 0) > 1024 * 1024) throw new QueryError(413, 'payload_too_large', t('File must not exceed 1 MiB.'));
-        content = await decodeSource(await this.api.download(this.config.token, file.file_id), file.file_name ?? '');
+      if (!session.upload_draft_id) {
+        await this.uploads.start(db, user.id, session.draft_name ?? 'Knowledge base', session.knowledge_base_id);
+        session.upload_draft_id = (await db.query('SELECT upload_draft_id FROM telegram_sessions WHERE user_id=$1', [user.id])).rows[0].upload_draft_id;
       }
-      const source = sourceText({ text: content });
-      if (Buffer.byteLength(source) > 1024 * 1024) throw new QueryError(413, 'payload_too_large', t('Text must not exceed 1 MiB.'));
-      if (session.state === 'upload') {
-        const count = await db.query('SELECT count(*)::int AS count FROM knowledge_bases WHERE owner_id = $1', [ownerId(user.id)]);
-        if (count.rows[0].count >= 20) throw new QueryError(429, 'base_limit', t('You can create up to 20 knowledge bases.'));
-      }
-      const result = session.state === 'replace'
-        ? await replaceKnowledgeBase(db, ownerId(user.id), session.knowledge_base_id!, source)
-        : await createKnowledgeBase(db, ownerId(user.id), source, session.draft_name!);
-      await db.query('INSERT INTO telegram_notifications (task_id, chat_id) VALUES ($1, $2)', [result.taskId, user.id]);
-      await this.session(db, user.id, 'selected', result.id);
-      await this.enqueue(db, botId, user.id, t('Content accepted. Processing will continue in the background; you will receive a notification.'), buttons([[[t('View knowledge base'), `kb:${result.id}`]]]));
-      return;
+      return this.uploads.add(db, user.id, session.upload_draft_id!, message.message_id ?? update.update_id, message.document, text);
     }
     if (session.state === 'create_bot' && session.knowledge_base_id) {
       const kb = await this.base(db, user.id, session.knowledge_base_id);
@@ -676,6 +667,7 @@ export class TelegramService {
       await this.base(db, user.id, session.knowledge_base_id);
       return this.answer(db, botId, user.id, ownerId(user.id), session.knowledge_base_id, text);
     }
+    if (message.document) throw new QueryError(409, 'upload_closed', t('Open or resume an upload before sending files. Files sent after Done are not added.'));
     await this.enqueue(db, botId, user.id, t('Use the menu buttons, or /cancel to return to the main menu.'));
   }
 
@@ -703,8 +695,8 @@ export class TelegramService {
       }
       if (session?.state === 'owner_limit') return this.protectionAction(db, user, `ol:${session.draft_name}`);
       if (session?.state === 'bind' && session.draft_name) return this.list(db, user, 'bases', 0, session.draft_name);
-      if (session?.state === 'upload') return this.enqueue(db, this.config.managerId, user,
-        t('Send text or a file up to 1 MiB. Scanned pages need text recognition first.'), buttons([[[t('Back'), 'new'], [t('Main menu'), 'menu']]]));
+      if (session?.upload_draft_id) return this.uploads.show(db, user, session.upload_draft_id);
+      if (session?.state === 'upload') return this.uploads.start(db, user, session.draft_name ?? 'Knowledge base');
       if (session?.state === 'name') return this.action(db, user, 'new');
       if (session?.knowledge_base_id) {
         if (['replace', 'rename', 'test', 'create_bot'].includes(session.state)) return this.action(db, user, `${session.state === 'create_bot' ? 'create' : session.state}:${session.knowledge_base_id}`);
@@ -713,6 +705,7 @@ export class TelegramService {
       return this.menu(db, user);
     }
     if (action === 'new') {
+      await db.query("DELETE FROM upload_drafts WHERE user_id=$1 AND status='collecting'", [user]);
       await this.session(db, user, 'name');
       return this.enqueue(db, this.config.managerId, user, t('What is the name of your knowledge base?'), buttons([[[t('Back'), 'menu']]]));
     }
@@ -755,9 +748,10 @@ export class TelegramService {
       [[t('Refresh status'), `kb:${id}`], [t('Rename'), `rename:${id}`]],
       [[t('Delete knowledge base'), `delete:${id}`]], [[t('Back'), `kb:${id}`], [t('Main menu'), 'menu']],
     ]));
-    if (action === 'replace' || action === 'rename' || action === 'test') {
+    if (action === 'replace') return this.uploads.start(db, user, kb.name, id);
+    if (action === 'rename' || action === 'test') {
       await this.session(db, user, action, id);
-      return this.enqueue(db, this.config.managerId, user, action === 'replace' ? t('Send a file or text to replace the complete content. The previous ready version stays available during processing.') : action === 'rename' ? t('Send the new name.') : t('Send a question to test this knowledge base. Use /cancel when finished.'),
+      return this.enqueue(db, this.config.managerId, user, action === 'rename' ? t('Send the new name.') : t('Send a question to test this knowledge base. Use /cancel when finished.'),
         buttons([[[t(action === 'test' ? 'Finish testing' : 'Back'), `kb:${id}`], [t('Main menu'), 'menu']]]));
     }
     if (action === 'create') {

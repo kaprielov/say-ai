@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg';
-import { chunkText, chunkingConfig } from './chunking.js';
+import { chunkingConfig } from './chunking.js';
+import { prepareChunks } from './prepare-chunks.js';
 import { IngestionError, validateVectors, type Embedder } from './embeddings.js';
 
 type Task = { id: string; knowledge_base_id: string; source_text: string; attempts_started: number; version_id: string };
@@ -100,7 +101,7 @@ export class IngestionProcessor {
       if (embedder.model !== this.embedder.model || embedder.dimensions !== this.embedder.dimensions) {
         throw new IngestionError('embedding_configuration_mismatch', 'Owner embedding configuration does not match the content version.', false);
       }
-      const chunks = chunkText(task.source_text);
+      const chunks = await prepareChunks(task.source_text, attemptSignal);
       if (chunks.length === 0) throw new IngestionError('empty_content', 'Source contains no usable content.', false);
       for (let offset = 0; offset < chunks.length; offset += 16) {
         attemptSignal.throwIfAborted();

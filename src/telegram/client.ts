@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { uploadLimits } from '../ingestion/limits.js';
 import { QueryError } from '../queries/errors.js';
 
 export class TelegramError extends Error {
@@ -9,7 +10,7 @@ export class TelegramError extends Error {
 
 export interface TelegramTransport {
   call<T = unknown>(token: string, method: string, payload?: object): Promise<T>;
-  download(token: string, fileId: string): Promise<Buffer>;
+  download(token: string, fileId: string, signal?: AbortSignal): Promise<Buffer>;
 }
 
 export class TelegramClient implements TelegramTransport {
@@ -30,19 +31,21 @@ export class TelegramClient implements TelegramTransport {
     }
   }
 
-  async download(token: string, fileId: string) {
+  async download(token: string, fileId: string, signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const file = await this.call<{ file_path?: string; file_size?: number }>(token, 'getFile', { file_id: fileId });
-    if (!file.file_path || (file.file_size ?? 0) > 1024 * 1024) {
-      throw new QueryError(413, 'payload_too_large', 'File must not exceed 1 MiB.');
+    if (!file.file_path) throw new TelegramError(502);
+    if ((file.file_size ?? 0) > uploadLimits.fileBytes) {
+      throw new QueryError(413, 'payload_too_large', 'File must not exceed 20 MB.');
     }
     try {
-      const response = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`, { signal: AbortSignal.timeout(20_000) });
+      const response = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) });
       if (!response.ok || !response.body) throw new TelegramError(502);
       const chunks: Buffer[] = [];
       let size = 0;
       for await (const chunk of response.body) {
         size += chunk.length;
-        if (size > 1024 * 1024) throw new QueryError(413, 'payload_too_large', 'File must not exceed 1 MiB.');
+        if (size > uploadLimits.fileBytes) throw new QueryError(413, 'payload_too_large', 'File must not exceed 20 MB.');
         chunks.push(Buffer.from(chunk));
       }
       return Buffer.concat(chunks);

@@ -34,23 +34,38 @@ export function chunkText(text: string, maxTokens = 512, overlapTokens = 64) {
   }
   // Slice original Unicode code points rather than token bytes, which can split a character.
   const characters = Array.from(text);
-  const offsets = new Map<number, number>([[0, 0]]);
+  const offsets = new Uint32Array(text.length + 1);
   let offset = 0;
   for (const [index, character] of characters.entries()) {
     offset += character.length;
-    offsets.set(offset, index + 1);
+    offsets[offset] = index + 1;
   }
-  const paragraphs = Array.from(text.matchAll(/(?:\r?\n[\t ]*){2,}/g), match => offsets.get(match.index + match[0].length)!);
-  const sentences = Array.from(sentenceSegmenter.segment(text), segment => offsets.get(segment.index + segment.segment.length)!);
+  const paragraphs = Array.from(text.matchAll(/(?:\r?\n[\t ]*){2,}/g), match => offsets[match.index + match[0].length]!);
+  // LF is a mandatory sentence break. Segment lines independently to avoid
+  // ICU repeatedly traversing a multi-megabyte input for each sentence.
+  const sentences = Array.from(text.matchAll(/[^\n]*\n|[^\n]+$/gu)).flatMap(line =>
+    Array.from(sentenceSegmenter.segment(line[0]), segment => offsets[line.index + segment.index + segment.segment.length]!));
   const boundaries = [...new Set([...paragraphs, ...sentences])].sort((a, b) => a - b);
+  const paragraphEnds = new Set(paragraphs);
+  let paragraphIndex = 0;
   let coveredEnd = 0;
   const chunks: { text: string; tokenCount: number }[] = [];
   let start = 0;
   while (start < characters.length) {
+    const minimum = Math.max(start, coveredEnd);
+    while (paragraphIndex < paragraphs.length && paragraphs[paragraphIndex]! <= minimum) paragraphIndex++;
+    const nextParagraph = paragraphs[paragraphIndex];
+    // Every UTF-8 byte can be represented by at most one ordinary token. If
+    // the whole paragraph fits this byte bound, every prefix fits as well;
+    // the binary search below would necessarily reach this paragraph end.
+    const shortParagraph = nextParagraph !== undefined && nextParagraph - start <= maxTokens
+      ? characters.slice(start, nextParagraph).join('') : undefined;
     let low = start + 1;
     let high = Math.min(characters.length, start + maxTokens * 16);
     let end = start;
-    while (low <= high) {
+    if (shortParagraph !== undefined && Buffer.byteLength(shortParagraph) <= maxTokens) {
+      end = nextParagraph!;
+    } else while (low <= high) {
       const middle = Math.floor((low + high) / 2);
       if (countTokens(characters.slice(start, middle).join('')) <= maxTokens) {
         end = middle;
@@ -62,8 +77,7 @@ export function chunkText(text: string, maxTokens = 512, overlapTokens = 64) {
     if (end === start) throw new Error('A source character exceeds the chunk budget.');
     // Keep paragraphs separate so an embedding does not mix unrelated policies.
     // Only choose a boundary beyond the preceding chunk to avoid repeating an overlap forever.
-    const minimum = Math.max(start, coveredEnd);
-    const paragraphEnd = paragraphs.find(boundary => boundary > minimum && boundary <= end);
+    const paragraphEnd = nextParagraph !== undefined && nextParagraph <= end ? nextParagraph : undefined;
     if (paragraphEnd !== undefined) end = paragraphEnd;
     else if (end < characters.length) {
       // Oversized paragraphs use sentences; oversized sentences retain a hard token limit.
@@ -75,7 +89,7 @@ export function chunkText(text: string, maxTokens = 512, overlapTokens = 64) {
     coveredEnd = Math.max(coveredEnd, end);
     if (end === characters.length) break;
     // Neighbor expansion supplies surrounding paragraphs at query time.
-    if (paragraphs.includes(end)) {
+    if (paragraphEnds.has(end)) {
       start = end;
       continue;
     }

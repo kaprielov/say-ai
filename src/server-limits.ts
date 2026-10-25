@@ -3,7 +3,7 @@ import type { RequestHandler } from 'express';
 // Operator limits. Bot owners cannot override these process-level bounds.
 export const serverLimits = {
   httpConcurrent: 64, httpPerSecond: 100,
-  queued: 1000, queuedPerBot: 100, queuedPerOwner: 200, queuedPerVisitor: 5, managerReserve: 100,
+  queued: 1000, queuedPerBot: 100, queuedPerOwner: 200, queuedPerVisitor: 5, queuedPerManagerUser: 20, managerReserve: 100,
   outbox: 5000, visitorPerMinute: 30, ownerPerMinute: 120,
 } as const;
 

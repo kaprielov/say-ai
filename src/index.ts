@@ -1,3 +1,4 @@
+import { startUploadWorker } from './telegram/upload-worker.js';
 import { createApp } from './app.js';
 import { config, readAuthConfig, readIngestionConfig, readQueryConfig, readTelegramConfig } from './config.js';
 import { pool } from './db.js';
@@ -24,6 +25,7 @@ const questions = queryConfig || ownerOpenAI ? new QuestionAnswering({
 const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions, ownerOpenAI) : undefined;
 const app = createApp({ pool, ...readAuthConfig(), questions, telegram });
 let worker: Awaited<ReturnType<typeof startIngestionWorker>> | undefined;
+let uploadWorker: Awaited<ReturnType<typeof startUploadWorker>> | undefined;
 let telegramWorker: Awaited<ReturnType<typeof startTelegramWorker>> | undefined;
 let server: ReturnType<typeof app.listen> | undefined;
 let shuttingDown = false;
@@ -35,6 +37,7 @@ async function shutdown(failed = false) {
   const closed = server ? new Promise<void>((resolve, reject) => {
     server!.close(error => error ? reject(error) : resolve());
   }) : Promise.resolve();
+  await uploadWorker?.stop();
   await telegramWorker?.stop();
   await worker?.stop();
   await closed;
@@ -69,6 +72,10 @@ if (!shuttingDown) {
 
 if (telegram && !shuttingDown) {
   try {
+    uploadWorker = await startUploadWorker(telegram, () => {
+      console.error('Upload preparation worker stopped unexpectedly. Restart to recover unfinished uploads.');
+      void shutdown(true);
+    });
     telegramWorker = await startTelegramWorker(telegram, () => {
       console.error('Telegram worker stopped unexpectedly. Restart the application to recover queued work.');
       void shutdown(true);

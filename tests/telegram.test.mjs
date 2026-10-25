@@ -1,3 +1,4 @@
+import { processUploadNext } from '../src/telegram/upload-worker.ts';
 import { startTyping } from '../src/telegram/typing.ts';
 import { QueryError } from '../src/queries/errors.ts';
 import assert from 'node:assert/strict';
@@ -76,7 +77,14 @@ async function makeBase(user, name = 'Store') {
   await deliver(callback(user, 'new'));
   await deliver(message(user, name));
   await deliver(message(user, undefined, { document: { file_id: 'document', file_name: 'store.md', file_size: 30 } }));
+  await finishUpload(user);
   return (await pool.query('SELECT id FROM knowledge_bases WHERE owner_id = $1 ORDER BY created_at DESC LIMIT 1', [`telegram:${user}`])).rows[0].id;
+}
+async function finishUpload(user) {
+  const draft = (await pool.query("SELECT id FROM upload_drafts WHERE user_id=$1 AND status='collecting'", [user])).rows[0];
+  assert.ok(draft, 'An editable upload draft exists');
+  await deliver(callback(user, `ud:${draft.id}`));
+  assert.equal(await processUploadNext(service), true);
 }
 async function ready(id) {
   const task = (await pool.query('SELECT id FROM ingestion_tasks WHERE knowledge_base_id = $1 ORDER BY created_at DESC LIMIT 1', [id])).rows[0].id;
@@ -112,11 +120,24 @@ test('webhooks authenticate before parsing and durably deduplicate updates', asy
   assert.equal((await pool.query('SELECT payload FROM telegram_updates WHERE update_id = $1', [update.update_id])).rows[0].payload, null);
 });
 
+test('multiple documents stay in a draft until explicit completion', async () => {
+  await pool.query("INSERT INTO telegram_sessions(user_id,language) VALUES (901,'en')");
+  await deliver(callback(901, 'new'));
+  await deliver(message(901, 'Batch documents'));
+  for (let index = 0; index < 3; index++) {
+    await deliver(message(901, undefined, { message_id: 100 + index, media_group_id: 'group', document: { file_id: `batch-${index}`, file_name: `file-${index}.md` } }));
+  }
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM knowledge_bases WHERE owner_id='telegram:901'")).rows[0].count, 0);
+  const panel = (await pool.query("SELECT payload FROM telegram_outbox WHERE payload->>'chat_id'='901' ORDER BY id DESC LIMIT 1")).rows[0].payload;
+  assert.ok(panel.reply_markup.inline_keyboard.flat().some(button => button.text === 'Done'));
+});
+
 test('upload state survives service recreation and source processing is atomic', async () => {
   await deliver(callback(11, 'new'));
   await deliver(message(11, 'My store'));
   service = new TelegramService(pool, config, api, questions);
   await deliver(message(11, undefined, { document: { file_id: 'file', file_name: 'store.md' } }));
+  await finishUpload(11);
   const result = await pool.query('SELECT kb.id, kb.name, t.source_text FROM knowledge_bases kb JOIN ingestion_tasks t ON t.knowledge_base_id = kb.id WHERE kb.owner_id = $1', ['telegram:11']);
   assert.equal(result.rows[0].name, 'My store');
   assert.equal(result.rows[0].source_text, 'The store opens at 9 AM.');
@@ -138,8 +159,8 @@ test('replacement preserves active content, rejects concurrent replacement, and 
   const old = (await pool.query('SELECT active_version_id FROM knowledge_bases WHERE id = $1', [id])).rows[0].active_version_id;
   await notifyIngestion(service, db);
   assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_notifications WHERE chat_id = 14')).rows[0].count, 0);
-  await deliver(callback(14, `replace:${id}`)); await deliver(message(14, 'New opening hours.'));
-  await deliver(callback(14, `replace:${id}`)); await deliver(message(14, 'Conflicting replacement.'));
+  await deliver(callback(14, `replace:${id}`)); await deliver(message(14, 'New opening hours.')); await finishUpload(14);
+  await deliver(callback(14, `replace:${id}`)); await deliver(message(14, 'Conflicting replacement.')); await finishUpload(14);
   assert.equal((await pool.query('SELECT count(*)::int AS count FROM ingestion_tasks WHERE knowledge_base_id = $1', [id])).rows[0].count, 2);
   assert.equal((await pool.query('SELECT active_version_id FROM knowledge_bases WHERE id = $1', [id])).rows[0].active_version_id, old);
   await deliver(callback(14, `confirmdelete:${id}`));
@@ -197,7 +218,7 @@ test('configured daily quotas separate tests from customers and include failed p
   await deliver(message(1000, 'The customer has a separate allowance'), '202');
   assert.equal(answers.filter(answer => answer.owner === 'telegram:17').length, 3);
   const failing = new TelegramService(pool, config, api, { async ask() { throw new Error('Provider failure'); } });
-  await deliver(callback(18, 'new')); await deliver(message(18, 'Failing test')); await deliver(message(18, 'Test content'));
+  await deliver(callback(18, 'new')); await deliver(message(18, 'Failing test')); await deliver(message(18, 'Test content')); await finishUpload(18);
   const base = (await pool.query("SELECT id FROM knowledge_bases WHERE owner_id = 'telegram:18'")).rows[0].id;
   await deliver(callback(18, `test:${base}`));
   const original = service; service = failing;
@@ -250,6 +271,8 @@ test('a transient failure rolls back accepted content and retries without duplic
   assert.equal((await pool.query('SELECT state FROM telegram_sessions WHERE user_id = 21')).rows[0].state, 'upload');
   await pool.query('UPDATE telegram_updates SET available_at = now() WHERE update_id = $1', [update.update_id]);
   await processUpdate(service, db);
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM upload_draft_items i JOIN upload_drafts d ON d.id=i.draft_id WHERE d.user_id=21")).rows[0].count, 1);
+  await finishUpload(21);
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM knowledge_bases WHERE owner_id = 'telegram:21'")).rows[0].count, 1);
   assert.equal(await processUpdate(service, db), false);
 });
@@ -342,6 +365,7 @@ test('Russian preference survives workflow changes and restart; notifications an
   await deliver(message(30, 'Language')); // User content matching an English UI label stays unchanged.
   service = new TelegramService(pool, config, api, questions);
   await deliver(message(30, 'The comic store opens at 9 AM.'));
+  await finishUpload(30);
   const kb = (await pool.query("SELECT id, name FROM knowledge_bases WHERE owner_id = 'telegram:30'")).rows[0];
   assert.equal(kb.name, 'Language');
   assert.equal((await pool.query('SELECT language FROM telegram_sessions WHERE user_id = 30')).rows[0].language, 'ru');
@@ -364,7 +388,7 @@ test('language can be changed from the menu or command, without affecting anothe
   await deliver(message(30, '/language'));
   assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'Русский');
   await deliver(callback(30, 'lang:en'));
-  assert.equal((await lastReply(30)).reply_markup.inline_keyboard[0][0].text, 'My bots');
+  assert.ok((await lastReply(30)).reply_markup.inline_keyboard.flat().some(button => button.text === 'My bots'));
   await deliver(callback(30, 'language'));
   await deliver(callback(30, 'lang:ru'));
   await deliver(message(11, '/start'));
@@ -938,8 +962,36 @@ test('dialogue migration rolls back and reapplies on the disposable database', a
   const url = new URL(process.env.DATABASE_URL);
   url.pathname = `/${databaseName}`;
   const run = (...args) => promisify(execFile)(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', ...args, '--no-verbose'], { env: { ...process.env, DATABASE_URL: url.toString() } });
-  await run('down', '1');
+  await run('down', '2');
   assert.equal((await pool.query("SELECT to_regclass('telegram_dialogues') AS name")).rows[0].name, null);
   await run('up');
   assert.equal((await pool.query("SELECT memory_pairs,memory_idle_minutes FROM telegram_bots WHERE id=8300")).rows[0].memory_pairs, 5);
+});
+
+test('manager webhook admits a complete ten-file selection without consuming visitor backlog slots', async () => {
+  const updates = Array.from({ length: 10 }, (_, index) => message(923451, undefined, {
+    message_id: 2000 + index, media_group_id: 'ten-files', document: { file_id: `group-${index}`, file_name: `file-${index}.md` },
+  }));
+  try {
+    for (const update of updates) {
+      const response = await fetch(`${baseUrl}/telegram/webhook/100`, { method: 'POST', headers: {
+        'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': config.webhookSecret,
+      }, body: JSON.stringify(update) });
+      assert.equal(response.status, 200);
+    }
+    assert.equal((await pool.query('SELECT count(*)::int AS count FROM telegram_updates WHERE bot_id=100 AND update_id=ANY($1::bigint[])', [updates.map(update => update.update_id)])).rows[0].count, 10);
+    for (let index = 0; index < 10; index++) {
+      const update = message(923451, '/help'); updates.push(update);
+      const response = await fetch(`${baseUrl}/telegram/webhook/100`, { method: 'POST', headers: {
+        'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': config.webhookSecret,
+      }, body: JSON.stringify(update) });
+      assert.equal(response.status, 200);
+    }
+    const overflow = message(923451, '/help'); updates.push(overflow);
+    assert.equal((await fetch(`${baseUrl}/telegram/webhook/100`, { method: 'POST', headers: {
+      'Content-Type': 'application/json', 'X-Telegram-Bot-Api-Secret-Token': config.webhookSecret,
+    }, body: JSON.stringify(overflow) })).status, 503);
+  } finally {
+    await pool.query('DELETE FROM telegram_updates WHERE bot_id=100 AND update_id=ANY($1::bigint[])', [updates.map(update => update.update_id)]);
+  }
 });

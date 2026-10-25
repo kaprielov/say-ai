@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { QueryError } from '../queries/errors.js';
 
 export const documentExtensions = new Set(['.pdf', '.docx', '.doc']);
-const maxTextBytes = 1024 * 1024;
+import { uploadLimits } from './limits.js';
+const maxTextBytes = uploadLimits.textBytes;
 let activeExtractions = 0;
 
 export async function extractDocument(buffer: Buffer, extension: string, signal?: AbortSignal): Promise<string> {
@@ -34,7 +35,7 @@ export async function extractDocument(buffer: Buffer, extension: string, signal?
       child.stdout.on('data', (chunk: Buffer) => {
         size += chunk.length;
         if (size > maxTextBytes) {
-          stop(new QueryError(413, 'extracted_text_too_large', 'Extracted text must not exceed 1 MiB.'));
+          stop(new QueryError(413, 'extracted_text_too_large', 'Extracted text must not exceed 5 MiB.'));
         } else chunks.push(chunk);
       });
       // A parser may exit before consuming its input (for example, an invalid document).

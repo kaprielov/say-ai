@@ -15,6 +15,7 @@
     "pilot:status": "node --env-file-if-exists=.env scripts/pilot-status.mjs",
     "test:db": "node --env-file-if-exists=.env --test tests/database.test.mjs",
     "test:api": "node --env-file-if-exists=.env --import tsx --test tests/api.test.mjs",
+    "test:uploads": "node --env-file-if-exists=.env --import tsx --test tests/uploads.test.mjs tests/chunk-preparation.test.mjs",
     "test:documents": "node --import tsx --test tests/documents.test.mjs",
     "test:ingestion": "node --env-file-if-exists=.env --import tsx --test tests/ingestion.test.mjs",
     "test:queries": "node --env-file-if-exists=.env --import tsx --test tests/queries.test.mjs tests/conversation.test.mjs",
