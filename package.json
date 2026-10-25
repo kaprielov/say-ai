@@ -24,7 +24,8 @@
     "test:server-limits": "node --import tsx --test tests/server-limits.test.mjs",
     "dev:public": "node --env-file-if-exists=.env scripts/dev-public.mjs",
     "test:dev-public": "node --test tests/dev-public.test.mjs",
-    "test:owner-keys": "node --env-file-if-exists=.env --import tsx --test tests/owner-openai.test.mjs"
+    "test:owner-keys": "node --env-file-if-exists=.env --import tsx --test tests/owner-openai.test.mjs",
+    "test:images": "node --env-file-if-exists=.env --import tsx --test tests/images.test.mjs tests/image-sources.test.mjs"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -36,6 +37,7 @@
     "multer": "^2.5.0",
     "pdf-parse": "^2.4.5",
     "pg": "^8.23.1",
+    "sharp": "^0.35.5",
     "word-extractor": "^1.0.4"
   },
   "devDependencies": {

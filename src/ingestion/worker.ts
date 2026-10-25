@@ -1,10 +1,13 @@
 import { setTimeout } from 'node:timers/promises';
 import type { Pool } from 'pg';
+import { prepareImage } from './image-sources.js';
+import { sourceText } from './source.js';
+import type { ImageRecognizer } from './image-recognition.js';
 import { IngestionProcessor } from './processor.js';
 import type { Embedder } from './embeddings.js';
 import { WorkerProgress } from '../worker-progress.js';
 
-export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void, ownerEmbedder?: (owner: string, knowledgeBaseId?: string) => Promise<Embedder>) {
+export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFailure: () => void, ownerEmbedder?: (owner: string, knowledgeBaseId?: string) => Promise<Embedder>, imageProvider?: (owner: string, knowledgeBaseId?: string) => Promise<ImageRecognizer>) {
   const client = await pool.connect();
   const controller = new AbortController();
   let failed = false;
@@ -27,7 +30,12 @@ export async function startIngestionWorker(pool: Pool, embedder: Embedder, onFai
     throw error;
   }
 
-  const processor = new IngestionProcessor(client, embedder, undefined, ownerEmbedder, () => progress.record());
+  const processor = new IngestionProcessor(client, embedder, undefined, ownerEmbedder, () => progress.record(), imageProvider ? async (taskId, signal) => {
+    const images = (await pool.query<{ id: string }>('SELECT id FROM image_sources WHERE ingestion_task_id=$1 ORDER BY created_at,id', [taskId])).rows;
+    const parts: string[] = [];
+    for (const image of images) parts.push(await prepareImage(pool, image.id, imageProvider, signal));
+    return sourceText({ text: parts.join('\n\n') });
+  } : undefined);
   const running = (async () => {
     try {
       while (!controller.signal.aborted) {

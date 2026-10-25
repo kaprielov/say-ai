@@ -1,24 +1,27 @@
 import type { Pool, PoolClient } from 'pg';
 import { QueryError } from '../queries/errors.js';
+import { addImageSource } from '../ingestion/image-sources.js';
+import type { ImageSource } from '../ingestion/images.js';
 import { sourceText } from '../ingestion/source.js';
 
 type Database = Pick<PoolClient, 'query'>;
 
 // Call mutations inside a transaction, including when used outside the HTTP API.
-export async function createKnowledgeBase(db: Database, owner: string, text: string, name = 'Knowledge base') {
-  sourceText({ text });
+export async function createKnowledgeBase(db: Database, owner: string, text: string | ImageSource, name = 'Knowledge base') {
+  if (typeof text === 'string') sourceText({ text });
   const result = await db.query<{ id: string }>(
     'INSERT INTO knowledge_bases (owner_id, name) VALUES ($1, $2) RETURNING id', [owner, name],
   );
   const id = result.rows[0]!.id;
   const task = await db.query<{ id: string }>(
-    'INSERT INTO ingestion_tasks (knowledge_base_id, source_text) VALUES ($1, $2) RETURNING id', [id, text],
+    'INSERT INTO ingestion_tasks (knowledge_base_id, source_text) VALUES ($1, $2) RETURNING id', [id, typeof text === 'string' ? text : null],
   );
+  if (typeof text !== 'string') await addImageSource(db, owner, text.filename, { task: task.rows[0]!.id }, text.bytes);
   return { id, taskId: task.rows[0]!.id, queryable: false };
 }
 
-export async function replaceKnowledgeBase(db: Database, owner: string, id: string, text: string) {
-  sourceText({ text });
+export async function replaceKnowledgeBase(db: Database, owner: string, id: string, text: string | ImageSource) {
+  if (typeof text === 'string') sourceText({ text });
   const result = await db.query<{ active_version_id: string | null }>(
     'SELECT active_version_id FROM knowledge_bases WHERE id = $1 AND owner_id = $2 FOR UPDATE', [id, owner],
   );
@@ -27,8 +30,9 @@ export async function replaceKnowledgeBase(db: Database, owner: string, id: stri
     INSERT INTO ingestion_tasks (knowledge_base_id, source_text, created_at, updated_at)
     VALUES ($1, $2, clock_timestamp(), clock_timestamp())
     ON CONFLICT (knowledge_base_id) WHERE status IN ('pending', 'processing') DO NOTHING RETURNING id
-  `, [id, text]);
+  `, [id, typeof text === 'string' ? text : null]);
   if (!task.rows[0]) throw new QueryError(409, 'ingestion_in_progress', 'Content ingestion is already pending or processing.');
+  if (typeof text !== 'string') await addImageSource(db, owner, text.filename, { task: task.rows[0].id }, text.bytes);
   await db.query('UPDATE knowledge_bases SET updated_at = clock_timestamp() WHERE id = $1', [id]);
   return { id, taskId: task.rows[0].id, queryable: result.rows[0].active_version_id !== null };
 }

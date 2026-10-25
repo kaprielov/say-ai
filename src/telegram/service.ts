@@ -1,3 +1,5 @@
+import type { ImageRecognizer } from '../ingestion/image-recognition.js';
+import { largestPhoto } from './uploads.js';
 import { UploadDrafts } from './uploads.js';
 import { loadDialogue, saveDialogue, type MemorySettings } from './memory.js';
 import { BotSettings, type BotAnswerSettings, type SettingsState } from '../bots/settings.js';
@@ -22,6 +24,8 @@ export type TelegramConfig = {
 type User = { id: number; is_bot?: boolean; username?: string };
 type Message = {
   chat: { id: number; type: string }; from?: User; text?: string; message_id?: number; key_redacted?: boolean;
+  photo?: { file_id: string; width: number; height: number; file_size?: number }[];
+  caption?: string;
   document?: { file_id: string; file_name?: string; file_size?: number };
 };
 export type Update = {
@@ -41,7 +45,7 @@ export class TelegramService {
   readonly uploads = new UploadDrafts(this);
   private readonly botSettings = new BotSettings();
   private readonly panels = new WeakMap<PoolClient, { chat: number; message: number; used: boolean }>();
-  constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>, readonly credentials?: OwnerCredentials) {}
+  constructor(readonly pool: Pool, readonly config: TelegramConfig, readonly api: TelegramTransport, readonly questions?: Pick<QuestionAnswering, 'ask'>, readonly credentials?: OwnerCredentials, readonly imageProvider?: (owner: string, knowledgeBaseId?: string) => Promise<ImageRecognizer>) {}
 
   async locale(db: PoolClient, user: number | string) {
     const row = (await db.query<{ language: Language | null }>('SELECT language FROM telegram_sessions WHERE user_id = $1', [user])).rows[0];
@@ -697,7 +701,7 @@ export class TelegramService {
         await this.uploads.start(db, user.id, session.draft_name ?? 'Knowledge base', session.knowledge_base_id);
         session.upload_draft_id = (await db.query('SELECT upload_draft_id FROM telegram_sessions WHERE user_id=$1', [user.id])).rows[0].upload_draft_id;
       }
-      return this.uploads.add(db, user.id, session.upload_draft_id!, message.message_id ?? update.update_id, message.document, text);
+      return this.uploads.add(db, user.id, session.upload_draft_id!, message.message_id ?? update.update_id, message.document ?? largestPhoto(message.photo), text, message.caption);
     }
     if (session.state === 'create_bot' && session.knowledge_base_id) {
       const kb = await this.base(db, user.id, session.knowledge_base_id);
@@ -707,7 +711,7 @@ export class TelegramService {
       await this.base(db, user.id, session.knowledge_base_id);
       return this.answer(db, botId, user.id, ownerId(user.id), session.knowledge_base_id, text);
     }
-    if (message.document) throw new QueryError(409, 'upload_closed', t('Open or resume an upload before sending files. Files sent after Done are not added.'));
+    if (message.document || message.photo?.length) throw new QueryError(409, 'upload_closed', t('Open or resume an upload before sending files. Files sent after Done are not added.'));
     await this.enqueue(db, botId, user.id, t('Use the menu buttons, or /cancel to return to the main menu.'));
   }
 

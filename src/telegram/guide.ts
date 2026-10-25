@@ -9,7 +9,7 @@ Document processing and answers use your OpenAI API billing.`;
 export const managerHelp = {
   menu: `Manager help
 
-Create knowledge base — name a collection of information, then send text or up to 10 files together or separately and tap Done. Each file may be up to 20 MB, with 50 MB of files and 5 MiB of extracted text per upload. Supported: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Scans need text recognition before uploading. You can have up to 20 knowledge bases. Processing runs in the background; you receive a notification when it finishes.
+Create knowledge base — name a collection of information, then send text or up to 10 files together or separately and tap Done. Each file may be up to 20 MB, with 50 MB of files and 5 MiB of extracted text per upload. Supported: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC, JPEG, PNG, WebP. Images are recognized using your OpenAI key; send small text as a file for better quality. Image tables can be used to answer questions. Scanned PDFs and pictures inside documents are not recognized. You can have up to 20 knowledge bases. Processing runs in the background; you receive a notification when it finishes.
 
 My knowledge bases — open a base to check its status, test answers, update content, rename it, create a bot, or delete it.
 
@@ -88,7 +88,7 @@ export const russianManagerIntroduction = `Создайте бота, котор
 export const russianManagerHelp: Record<HelpTopic, string> = {
   menu: `Справка по менеджеру
 
-Создать базу знаний — задайте название, затем отправьте текст или до 10 файлов вместе либо по очереди и нажмите «Готово». Каждый файл — до 20 МБ, все файлы — до 50 МБ, извлечённый текст — до 5 МиБ. Форматы: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC. Текст сканов нужно распознать до загрузки. Можно создать до 20 баз знаний. Обработка идёт в фоне; вы получите уведомление о её завершении.
+Создать базу знаний — задайте название, затем отправьте текст или до 10 файлов вместе либо по очереди и нажмите «Готово». Каждый файл — до 20 МБ, все файлы — до 50 МБ, извлечённый текст — до 5 МиБ. Форматы: TXT, Markdown, CSV, JSON, YAML, PDF, DOCX, DOC, JPEG, PNG, WebP. Картинки распознаются с вашим ключом OpenAI; мелкий текст лучше отправлять файлом. Таблицы на картинках используются для ответов. Сканы PDF и картинки внутри документов не распознаются. Можно создать до 20 баз знаний. Обработка идёт в фоне; вы получите уведомление о её завершении.
 
 Мои базы знаний — откройте базу, чтобы проверить статус и ответы, обновить содержимое, изменить название, создать бота или удалить базу.
 

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="460" viewBox="0 0 1000 460">
+<rect width="1000" height="460" fill="white"/>
+<g font-family="Arial, sans-serif" font-size="32" fill="black">
+<text x="30" y="55">Aurora shirts — body measurements (cm)</text>
+<path d="M30 90H970M30 160H970M30 230H970M30 300H970M30 370H970M30 90V370M220 90V370M470 90V370M720 90V370M970 90V370" stroke="black" fill="none" stroke-width="2"/>
+<text x="50" y="135">Size</text><text x="250" y="135">Chest (cm)</text><text x="500" y="135">Waist (cm)</text><text x="750" y="135">Hip (cm)</text>
+<text x="50" y="205">S</text><text x="250" y="205">88–91</text><text x="500" y="205">72–75</text><text x="750" y="205">92–95</text>
+<text x="50" y="275">M</text><text x="250" y="275">92–96</text><text x="500" y="275">76–80</text><text x="750" y="275">96–100</text>
+<text x="50" y="345">L</text><text x="250" y="345">97–101</text><text x="500" y="345">81–85</text><text x="750" y="345">101–105</text>
+<text x="30" y="425">Choose a row only when all supplied measurements fit.</text>
+</g></svg>

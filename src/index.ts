@@ -1,3 +1,4 @@
+import { OpenAIImageRecognizer } from './ingestion/image-recognition.js';
 import { startUploadWorker } from './telegram/upload-worker.js';
 import { createApp } from './app.js';
 import { config, readAuthConfig, readIngestionConfig, readQueryConfig, readTelegramConfig } from './config.js';
@@ -22,8 +23,8 @@ const questions = queryConfig || ownerOpenAI ? new QuestionAnswering({
   answerer: new OpenAIAnswerer(queryConfig?.apiKey ?? ''),
   providers: ownerOpenAI ? (owner, model, dimensions, context) => ownerOpenAI.providers(owner, model, dimensions, context) : undefined,
 }) : undefined;
-const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions, ownerOpenAI) : undefined;
-const app = createApp({ pool, ...readAuthConfig(), questions, telegram });
+const telegram = telegramConfig ? new TelegramService(pool, telegramConfig, new TelegramClient(), questions, ownerOpenAI, ownerOpenAI ? (owner, base) => ownerOpenAI.imageRecognizer(owner, base) : undefined) : undefined;
+const app = createApp({ pool, ...readAuthConfig(), questions, telegram, imageAvailable: async () => Boolean(ingestion?.apiKey) });
 let worker: Awaited<ReturnType<typeof startIngestionWorker>> | undefined;
 let uploadWorker: Awaited<ReturnType<typeof startUploadWorker>> | undefined;
 let telegramWorker: Awaited<ReturnType<typeof startTelegramWorker>> | undefined;
@@ -49,7 +50,8 @@ if (ingestion) {
     worker = await startIngestionWorker(pool, new OpenAIEmbedder(ingestion.apiKey ?? '', ingestion.model, ingestion.dimensions), () => {
       console.error('Ingestion worker stopped unexpectedly. Restart the application to recover unfinished work.');
       void shutdown(true);
-    }, ownerOpenAI ? (owner, knowledgeBaseId) => ownerOpenAI.ingestionEmbedder(owner, ingestion.model, ingestion.dimensions, knowledgeBaseId) : undefined);
+    }, ownerOpenAI ? (owner, knowledgeBaseId) => ownerOpenAI.ingestionEmbedder(owner, ingestion.model, ingestion.dimensions, knowledgeBaseId) : undefined,
+      ownerOpenAI ? (owner, base) => ownerOpenAI.imageRecognizer(owner, base) : async () => new OpenAIImageRecognizer(ingestion.apiKey ?? ''));
   } catch {
     console.error('Unable to start ingestion worker. Check database availability and ensure only one application instance is running.');
     await pool.end();

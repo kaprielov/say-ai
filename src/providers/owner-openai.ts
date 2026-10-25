@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import type { Pool } from 'pg';
 import { QueryError } from '../queries/errors.js';
 import { OpenAIEmbedder, IngestionError } from '../ingestion/embeddings.js';
+import { OpenAIImageRecognizer } from '../ingestion/image-recognition.js';
 import { OpenAIAnswerer } from '../queries/answerer.js';
 import { decryptToken, encryptToken } from '../telegram/client.js';
 import { spendingTransport, type SpendingContext } from './spending.js';
@@ -69,7 +70,11 @@ export class OwnerOpenAI implements OwnerCredentials {
       if (!this.defaultKey) throw new QueryError(503, 'querying_unavailable', 'Question answering is not configured.');
       key = this.defaultKey;
     }
-    return { embedder: new OpenAIEmbedder(key, model, dimensions, request), answerer: new OpenAIAnswerer(key, request) };
+    return { embedder: new OpenAIEmbedder(key, model, dimensions, request), answerer: new OpenAIAnswerer(key, request), imageRecognizer: new OpenAIImageRecognizer(key, request) };
+  }
+
+  async imageRecognizer(owner: string, knowledgeBaseId?: string) {
+    return (await this.providers(owner, this.model, this.dimensions, { purpose: 'ingestion', knowledgeBaseId })).imageRecognizer;
   }
 
   async ingestionEmbedder(owner: string, model = this.model, dimensions = this.dimensions, knowledgeBaseId?: string) {

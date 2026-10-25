@@ -1,3 +1,6 @@
+import { isImage, normalizeImage } from '../ingestion/images.js';
+import { prepareImage, saveImageBytes, type StoredImage } from '../ingestion/image-sources.js';
+import { IngestionError } from '../ingestion/embeddings.js';
 import { setTimeout } from 'node:timers/promises';
 import { transaction, createKnowledgeBase, replaceKnowledgeBase } from '../knowledge-bases/service.js';
 import { decodeSource, sourceText } from '../ingestion/source.js';
@@ -22,16 +25,36 @@ export async function processUploadNext(service: TelegramService, signal = new A
     if (job.attempts > 3) throw new QueryError(503, 'upload_interrupted', 'Upload preparation was interrupted too many times. Review the draft and try again.');
     const items = (await service.pool.query<DraftItem>('SELECT * FROM upload_draft_items WHERE draft_id=$1 ORDER BY message_id,id', [job.id])).rows;
     if (!items.length) throw new QueryError(400, 'empty_upload', 'Send at least one file or text message first.');
+    const owner = `telegram:${job.user_id}`;
+    if (items.some(item => isImage(item.filename))) {
+      if (!service.imageProvider) throw new QueryError(503, 'image_unavailable', 'Image processing is unavailable. Try again later.');
+      if (service.credentials && !(await service.credentials.available(owner))) throw new QueryError(503, 'openai_key_required', 'Connect your OpenAI API key in the manager to continue.');
+      if (!job.knowledge_base_id && (await service.pool.query('SELECT count(*)::int AS count FROM knowledge_bases WHERE owner_id=$1', [owner])).rows[0].count >= 20) throw new QueryError(429, 'base_limit', 'You can create up to 20 knowledge bases.');
+      if (job.knowledge_base_id) {
+        const base = (await service.pool.query('SELECT id FROM knowledge_bases WHERE id=$1 AND owner_id=$2', [job.knowledge_base_id, owner])).rowCount;
+        if (!base) return true;
+        if ((await service.pool.query("SELECT 1 FROM ingestion_tasks WHERE knowledge_base_id=$1 AND status IN ('pending','processing')", [job.knowledge_base_id])).rowCount) throw new QueryError(409, 'ingestion_in_progress', 'Content ingestion is already pending or processing.');
+      }
+    }
     for (const item of items) {
       signal.throwIfAborted();
       current = item;
       if (item.source_text !== null) continue;
-      const bytes = await service.api.download(service.config.token, item.file_id!, signal);
+      const image = isImage(item.filename) ? (await service.pool.query<StoredImage>('SELECT * FROM image_sources WHERE draft_item_id=$1', [item.id])).rows[0] : undefined;
+      if (isImage(item.filename) && !image) return true;
+      const bytes = image?.original_bytes ?? await service.api.download(service.config.token, item.file_id!, signal);
       signal.throwIfAborted();
       if (bytes.length > uploadLimits.fileBytes) throw new QueryError(413, 'payload_too_large', 'File must not exceed 20 MB.');
       const actualBytes = items.reduce((sum, other) => sum + (other.id === item.id ? bytes.length : other.actual_bytes ?? 0), 0);
       if (actualBytes > uploadLimits.batchBytes) throw new QueryError(413, 'batch_too_large', 'Files in one upload must not exceed 50 MB in total.');
-      const text = await decodeSource(bytes, item.filename, signal);
+      let text: string;
+      if (image) {
+        if (!image.original_bytes) {
+          await normalizeImage(bytes, item.filename, signal);
+          await saveImageBytes(service.pool, image.id, bytes);
+        }
+        text = await prepareImage(service.pool, image.id, service.imageProvider!, signal);
+      } else text = await decodeSource(bytes, item.filename, signal);
       const textBytes = items.reduce((sum, other) => sum + (other.id === item.id ? Buffer.byteLength(text) : Buffer.byteLength(other.source_text ?? '')), 0) + (items.length - 1) * 2;
       if (textBytes > uploadLimits.textBytes) throw new QueryError(413, 'extracted_text_too_large', 'Extracted text must not exceed 5 MiB.');
       const saved = await service.pool.query(`UPDATE upload_draft_items SET source_text=$3,actual_bytes=$4,error_message=NULL
@@ -42,7 +65,6 @@ export async function processUploadNext(service: TelegramService, signal = new A
     }
     signal.throwIfAborted();
     const content = sourceText({ text: items.map(item => item.source_text).join('\n\n') });
-    const owner = `telegram:${job.user_id}`;
     if (service.credentials && !(await service.credentials.available(owner))) throw new QueryError(503, 'openai_key_required', 'Connect your OpenAI API key in the manager to continue.');
     await transaction(service.pool, async db => {
       const active = (await db.query("SELECT * FROM upload_drafts WHERE id=$1 AND status='preparing' FOR UPDATE", [job.id])).rows[0];
@@ -55,18 +77,20 @@ export async function processUploadNext(service: TelegramService, signal = new A
       const result = job.knowledge_base_id
         ? await replaceKnowledgeBase(db, owner, job.knowledge_base_id, content)
         : await createKnowledgeBase(db, owner, content, job.name);
+      await db.query('UPDATE image_sources SET ingestion_task_id=$2,draft_item_id=NULL WHERE draft_item_id IN (SELECT id FROM upload_draft_items WHERE draft_id=$1)', [job.id, result.taskId]);
       await db.query('INSERT INTO telegram_notifications(task_id,chat_id) VALUES ($1,$2)', [result.taskId, job.user_id]);
       await db.query("UPDATE upload_drafts SET status='submitted',task_id=$2,expires_at=now()+interval '24 hours' WHERE id=$1", [job.id, result.taskId]);
       await db.query('DELETE FROM upload_draft_items WHERE draft_id=$1', [job.id]);
       await db.query("UPDATE telegram_sessions SET state='selected',knowledge_base_id=$3,upload_draft_id=NULL WHERE user_id=$1 AND upload_draft_id=$2", [job.user_id, job.id, result.id]);
       const t = await service.locale(db, job.user_id);
-      await service.enqueue(db, service.config.managerId, Number(job.user_id), t('Content accepted. Processing will continue in the background; you will receive a notification.'),
+      const partial = (await db.query("SELECT 1 FROM image_sources WHERE ingestion_task_id=$1 AND jsonb_array_length(evidence->'unreadable_regions')>0 LIMIT 1", [result.taskId])).rowCount;
+      await service.enqueue(db, service.config.managerId, Number(job.user_id), t('Content accepted. Processing will continue in the background; you will receive a notification.') + (partial ? '\n' + t('Some image regions could not be read. Test answers before sharing your bot; upload clearer images if needed.') : ''),
         { inline_keyboard: [[{ text: t('View knowledge base'), callback_data: `kb:${result.id}` }]] });
     });
   } catch (error) {
     // Leave preparation durable for startup recovery on shutdown or lost database connectivity.
     if (signal.aborted) throw error;
-    const permanent = error instanceof QueryError && error.code !== 'outbox_full';
+    const permanent = (error instanceof QueryError && !['outbox_full','image_capacity_full'].includes(error.code)) || (error instanceof IngestionError && !error.retryable);
     const outboxFull = error instanceof QueryError && error.code === 'outbox_full';
     const retry = outboxFull || (!permanent && job.attempts < 3 && !(error instanceof TelegramError && [400,401,403,404].includes(error.code)));
     await transaction(service.pool, async db => {
@@ -77,7 +101,7 @@ export async function processUploadNext(service: TelegramService, signal = new A
         await db.query("UPDATE upload_drafts SET status='queued',attempts=GREATEST(0,attempts-$3),available_at=now()+$2*interval '1 second' WHERE id=$1", [job.id, delay, outboxFull ? 1 : 0]);
         return;
       }
-      const reason = error instanceof QueryError ? error.message : 'Unable to download this file. Remove it or try again.';
+      const reason = error instanceof QueryError || error instanceof IngestionError ? error.message : 'Unable to download this file. Remove it or try again.';
       if (current) await db.query('UPDATE upload_draft_items SET error_message=$3 WHERE draft_id=$1 AND id=$2', [job.id, current.id, reason]);
       await db.query("UPDATE upload_drafts SET status='collecting',expires_at=now()+interval '24 hours' WHERE id=$1", [job.id]);
       const t = await service.locale(db, job.user_id);

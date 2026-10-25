@@ -1,0 +1,11 @@
+{
+  "visible_text": "Aurora shirts — body measurements (cm). Choose a row only when all supplied measurements fit.",
+  "description": "",
+  "tables": [{
+    "title": "Aurora shirts",
+    "headers": ["Size", "Chest (cm)", "Waist (cm)", "Hip (cm)"],
+    "rows": [["S", "88–91", "72–75", "92–95"], ["M", "92–96", "76–80", "96–100"], ["L", "97–101", "81–85", "101–105"]],
+    "notes": "Body measurements in cm. Choose a row only when all supplied measurements fit."
+  }],
+  "unreadable_regions": []
+}

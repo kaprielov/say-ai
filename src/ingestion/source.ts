@@ -4,6 +4,8 @@ import multer from 'multer';
 import { QueryError } from '../queries/errors.js';
 import { documentExtensions, extractDocument } from './documents.js';
 
+import { imageExtensions, isImage, normalizeImage } from './images.js';
+
 import { uploadLimits } from './limits.js';
 
 const maxFileBytes = uploadLimits.fileBytes;
@@ -13,8 +15,8 @@ const upload = multer({
   limits: { fileSize: maxFileBytes + 1, files: 1, fields: 0, parts: 2 },
   fileFilter: (_request, file, done) => {
     const extension = extname(file.originalname).toLowerCase();
-    if (!extensions.has(extension) && !documentExtensions.has(extension)) {
-      done(new QueryError(415, 'unsupported_file_type', 'Supported files: TXT, Markdown, CSV, TSV, JSON, JSONL, YAML, PDF, DOCX, and DOC.'));
+    if (!extensions.has(extension) && !documentExtensions.has(extension) && !imageExtensions.has(extension)) {
+      done(new QueryError(415, 'unsupported_file_type', 'Supported files: TXT, Markdown, CSV, TSV, JSON, JSONL, YAML, PDF, DOCX, DOC, JPEG, PNG, and WebP.'));
       return;
     }
     done(null, true);
@@ -68,7 +70,10 @@ export const parseSource: RequestHandler = (request, response, next) => {
       const onClose = () => { if (!response.writableEnded) controller.abort(); };
       response.once('close', onClose);
       try {
-        request.body = { text: await decodeSource(request.file.buffer, request.file.originalname, controller.signal) };
+        if (isImage(request.file.originalname)) {
+          await normalizeImage(request.file.buffer, request.file.originalname, controller.signal);
+          request.body = { image: { bytes: request.file.buffer, filename: request.file.originalname } };
+        } else request.body = { text: await decodeSource(request.file.buffer, request.file.originalname, controller.signal) };
         next();
       } catch (error) {
         next(error);
@@ -110,7 +115,7 @@ export async function decodeSource(buffer: Buffer, filename: string, signal = ne
 
 export function validateSourceFilename(filename: string) {
   const extension = extname(filename).toLowerCase();
-  if (!extensions.has(extension) && !documentExtensions.has(extension)) {
+  if (!extensions.has(extension) && !documentExtensions.has(extension) && !imageExtensions.has(extension)) {
     throw new QueryError(415, 'unsupported_file_type', 'Unsupported file format.');
   }
 }

@@ -4,6 +4,28 @@ export type Language = 'en' | 'ru';
 
 // Keep manager copy available in every supported interface language.
 const russian: Record<string, string> = {
+  "Send up to 10 files, together or separately, then tap Done. Each file: 20 MB; total files: 50 MB; extracted text: 5 MiB. JPEG, PNG, and WebP images are recognized using your OpenAI key. Send small text as a file for better quality. Scanned PDFs still require OCR.": "Отправьте до 10 файлов вместе или по очереди, затем нажмите «Готово». Каждый файл — до 20 МБ, все файлы — до 50 МБ, извлечённый текст — до 5 МиБ. Картинки JPEG, PNG и WebP распознаются с вашим ключом OpenAI. Мелкий текст лучше отправлять файлом. Сканы PDF нужно предварительно распознать.",
+  "Unable to read image. Use a static JPEG, PNG, or WebP image up to 25 megapixels.": "Не удалось прочитать картинку. Отправьте статичную картинку JPEG, PNG или WebP до 25 мегапикселей.",
+  "Image processing is busy. Try again later.": "Сейчас обрабатывается слишком много картинок. Попробуйте позже.",
+  "Image processing timed out. Try a smaller image.": "Не удалось обработать картинку за отведённое время. Отправьте картинку поменьше.",
+  "The normalized image is too large. Upload a smaller image.": "После обработки картинка всё ещё слишком большая. Отправьте картинку поменьше.",
+  "Image processing is unavailable. Try again later.": "Обработка картинок сейчас недоступна. Попробуйте позже.",
+  "Image storage is full. Remove an unused knowledge base or contact the operator.": "Хранилище картинок заполнено. Удалите ненужную базу знаний или обратитесь к администратору.",
+  "Image captions must not exceed 1024 characters.": "Подпись к картинке должна быть не длиннее 1024 символов.",
+  "Image recognition returned invalid evidence.": "Не удалось получить корректные данные с картинки. Попробуйте другую картинку.",
+  "Image contains no usable evidence. Upload a clearer image.": "На картинке не удалось распознать полезные данные. Отправьте более чёткую картинку.",
+  "This table is too wide. Split it into smaller images with the row labels visible.": "Таблица слишком широкая. Разделите её на несколько картинок, сохранив подписи строк.",
+  "Image recognition provider rejected the request. Check your key or try again.": "Сервис распознавания отклонил запрос. Проверьте ключ OpenAI или попробуйте снова.",
+  "Image recognition was incomplete. Upload a smaller or clearer image.": "Картинка распознана не полностью. Отправьте картинку поменьше или более чёткую.",
+  "This image could not be recognized. Upload another image.": "Эту картинку не удалось распознать. Отправьте другую.",
+  "Image recognition timed out. Try again.": "Не удалось распознать картинку за отведённое время. Попробуйте снова.",
+  "Image recognition failed. Try again.": "Не удалось распознать картинку. Попробуйте снова.",
+  "Image upload was cancelled.": "Загрузка картинки отменена.",
+  "Image upload is incomplete.": "Загрузка картинки не завершена.",
+  "Image recognition was interrupted too many times. Upload the image again.": "Распознавание картинки прерывалось слишком много раз. Загрузите её снова.",
+  "Some image regions could not be read. Test answers before sharing your bot; upload clearer images if needed.": "Некоторые участки картинок не удалось прочитать. Проверьте ответы, прежде чем делиться ботом; при необходимости загрузите более чёткие картинки.",
+  "Supported files: TXT, Markdown, CSV, TSV, JSON, JSONL, YAML, PDF, DOCX, DOC, JPEG, PNG, and WebP.": "Поддерживаемые файлы: TXT, Markdown, CSV, TSV, JSON, JSONL, YAML, PDF, DOCX, DOC, JPEG, PNG и WebP.",
+
   "Upload preparation was interrupted too many times. Review the draft and try again.": "Подготовка загрузки прерывалась слишком много раз. Откройте черновик и попробуйте снова.",
   "Done": "Готово",
   "Text": "Текст",

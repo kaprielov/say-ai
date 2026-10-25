@@ -3,6 +3,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import type { Pool } from 'pg';
 import type { QuestionAnswering } from './queries/service.js';
 import { QueryError } from './queries/errors.js';
+import type { ImageSource } from './ingestion/images.js';
 import { parseSource, sourceText } from './ingestion/source.js';
 import { createKnowledgeBase, replaceKnowledgeBase, transaction } from './knowledge-bases/service.js';
 import type { TelegramService } from './telegram/service.js';
@@ -15,13 +16,14 @@ type AppOptions = {
   ownerId: string;
   questions?: QuestionAnswering;
   telegram?: TelegramService;
+  imageAvailable?: () => Promise<boolean>;
 };
 
 function keyDigest(key: string) {
   return createHash('sha256').update(key).digest();
 }
 
-export function createApp({ pool, apiKey, ownerId, questions, telegram }: AppOptions) {
+export function createApp({ pool, apiKey, ownerId, questions, telegram, imageAvailable }: AppOptions) {
   const app = express();
   app.disable('x-powered-by');
   app.use(httpAdmission());
@@ -49,7 +51,8 @@ export function createApp({ pool, apiKey, ownerId, questions, telegram }: AppOpt
   });
 
   app.post('/knowledge-bases', parseSource, async (request, response) => {
-    const text = sourceText(request.body);
+    const text: string | ImageSource = request.file && request.body?.image ? request.body.image : sourceText(request.body);
+    if (typeof text !== 'string' && !(await imageAvailable?.())) throw new QueryError(503, 'image_unavailable', 'Image processing is unavailable. Try again later.');
 
     const { id } = await transaction(pool, db => createKnowledgeBase(db, response.locals.ownerId, text));
     response.location(`/knowledge-bases/${id}`).status(201).json({ id, status: 'pending', queryable: false });
@@ -60,7 +63,8 @@ export function createApp({ pool, apiKey, ownerId, questions, telegram }: AppOpt
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new QueryError(400, 'invalid_id', 'Knowledge base ID must be a valid UUID.');
     }
-    const text = sourceText(request.body);
+    const text: string | ImageSource = request.file && request.body?.image ? request.body.image : sourceText(request.body);
+    if (typeof text !== 'string' && !(await imageAvailable?.())) throw new QueryError(503, 'image_unavailable', 'Image processing is unavailable. Try again later.');
 
     const { queryable } = await transaction(pool, db => replaceKnowledgeBase(db, response.locals.ownerId, id, text));
     response.location(`/knowledge-bases/${id}`).status(202).json({ id, status: 'pending', queryable });

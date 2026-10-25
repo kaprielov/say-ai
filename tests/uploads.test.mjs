@@ -259,7 +259,8 @@ test('an exhausted interrupted job returns to its draft without another download
 test('upload draft migration rolls back and reapplies in the disposable database', async () => {
   const url = new URL(process.env.DATABASE_URL); url.pathname = `/${name}`;
   const run = (...args) => promisify(execFile)(process.execPath, ['node_modules/node-pg-migrate/bin/node-pg-migrate.js', ...args, '--no-verbose'], { env: { ...process.env, DATABASE_URL: url.toString() } });
-  await run('down', '1');
+  const rollbackCount = (await pool.query("SELECT count(*)::int AS count FROM pgmigrations WHERE id >= (SELECT id FROM pgmigrations WHERE name='1793404800000_upload_drafts')")).rows[0].count;
+  await run('down', String(rollbackCount));
   assert.equal((await pool.query("SELECT to_regclass('upload_drafts') AS name")).rows[0].name, null);
   await run('up');
   await fixture();

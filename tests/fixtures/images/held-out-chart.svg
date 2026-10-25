@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="390">
+<rect width="1100" height="390" fill="white"/>
+<g font-family="Arial, sans-serif" font-size="30" fill="black">
+<text x="25" y="55">Boreal trousers — garment measurements in inches</text>
+<path d="M25 85H1075M25 155H1075M25 225H1075M25 295H1075M25 85V295M280 85V295M680 85V295M1075 85V295" stroke="black" fill="none" stroke-width="2"/>
+<text x="50" y="130">Label</text><text x="310" y="130">Waist (inches)</text><text x="710" y="130">Inseam (inches)</text>
+<text x="50" y="200">30</text><text x="310" y="200">30.5</text><text x="710" y="200">31</text>
+<text x="50" y="270">32</text><text x="310" y="270">32.5</text><text x="710" y="270">32</text>
+<text x="25" y="350">Measurements are of the garment, not the body.</text>
+</g></svg>

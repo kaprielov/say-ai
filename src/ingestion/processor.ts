@@ -3,7 +3,7 @@ import { chunkingConfig } from './chunking.js';
 import { prepareChunks } from './prepare-chunks.js';
 import { IngestionError, validateVectors, type Embedder } from './embeddings.js';
 
-type Task = { id: string; knowledge_base_id: string; source_text: string; attempts_started: number; version_id: string };
+type Task = { id: string; knowledge_base_id: string; source_text: string | null; attempts_started: number; version_id: string };
 
 export class IngestionProcessor {
   constructor(
@@ -12,6 +12,7 @@ export class IngestionProcessor {
     private readonly retryDelaysMs: readonly [number, number] = [10_000, 60_000],
     private readonly ownerEmbedder?: (owner: string, knowledgeBaseId?: string) => Promise<Embedder>,
     private readonly onProgress?: () => Promise<void>,
+    private readonly prepareImages?: (taskId: string, signal: AbortSignal) => Promise<string>,
   ) {}
 
   private async transaction<T>(work: () => Promise<T>): Promise<T> {
@@ -101,7 +102,14 @@ export class IngestionProcessor {
       if (embedder.model !== this.embedder.model || embedder.dimensions !== this.embedder.dimensions) {
         throw new IngestionError('embedding_configuration_mismatch', 'Owner embedding configuration does not match the content version.', false);
       }
-      const chunks = await prepareChunks(task.source_text, attemptSignal);
+      let text = task.source_text;
+      if (text === null) {
+        if (!this.prepareImages) throw new IngestionError('image_unavailable', 'Image processing is unavailable. Try again later.', false);
+        text = await this.prepareImages(task.id, attemptSignal);
+        const saved = await this.client.query("UPDATE ingestion_tasks SET source_text=$2 WHERE id=$1 AND status='processing' RETURNING id", [task.id, text]);
+        if (!saved.rowCount) throw new IngestionError('image_cancelled', 'Image upload was cancelled.', false);
+      }
+      const chunks = await prepareChunks(text, attemptSignal);
       if (chunks.length === 0) throw new IngestionError('empty_content', 'Source contains no usable content.', false);
       for (let offset = 0; offset < chunks.length; offset += 16) {
         attemptSignal.throwIfAborted();

@@ -44,6 +44,7 @@ PostgreSQL initializes credentials only when the data volume is first created. E
 | `npm run pilot:status` | Read aggregate worker-lock, Telegram backlog, delivery retry, and ingestion status without provider or Telegram calls. |
 | `npm run test:db` | Verify schema constraints and vector retrieval against the migrated database. Fixtures are rolled back. |
 | `npm run test:api` | Test authentication, validation, persistence, owner isolation, and atomic creation in a temporary database. Requires database creation permission, available with the local Compose user. |
+| `npm run test:images` | Verify image decoding, table serialization, durable recognition, storage bounds, and Telegram/API image flows with controlled providers. |
 | `npm run test:documents` | Test document extraction capacity, cancellation, and cleanup without database or provider calls. |
 | `npm run test:ingestion` | Test chunking, the provider adapter, ingestion, activation, retries, and restart recovery in a temporary database. No paid provider calls by default. |
 | `npm run test:queries` | Test question answering, ownership, retrieval, grounding contracts, concurrency, deadlines, and cancellation in a temporary database. No paid provider calls by default. |
@@ -133,7 +134,7 @@ curl http://localhost:3000/knowledge-bases \
   -F "file=@knowledge.md"
 ```
 
-Supported extensions (case-insensitive): `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.yaml`, `.yml`, `.pdf`, `.docx`, and `.doc`. Files may be up to 20 MB (20,000,000 bytes) of file bytes, excluding multipart framing. Plain text formats must contain valid UTF-8 text, optionally with a UTF-8 BOM. Empty or whitespace-only text files, invalid UTF-8, and binary control characters return `400`; oversized files return `413`; unsupported extensions return `415`. Send exactly one file with no additional form fields. HTTP multipart buffering is limited to two simultaneous uploads per process; excess uploads return `429` with `upload_capacity_full`, and disconnects release admission capacity. JSON request bodies retain their 1 MiB limit. Malformed multipart requests, missing files, extra fields, and multiple files return `400` with `invalid_upload`.
+Supported extensions (case-insensitive): `.txt`, `.md`, `.markdown`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.yaml`, `.yml`, `.pdf`, `.docx`, `.doc`, `.jpg`, `.jpeg`, `.png`, and `.webp`. Files may be up to 20 MB (20,000,000 bytes) of file bytes, excluding multipart framing. Plain text formats must contain valid UTF-8 text, optionally with a UTF-8 BOM. Empty or whitespace-only text files, invalid UTF-8, and binary control characters return `400`; oversized files return `413`; unsupported extensions return `415`. Send exactly one file with no additional form fields. HTTP multipart buffering is limited to two simultaneous uploads per process; excess uploads return `429` with `upload_capacity_full`, and disconnects release admission capacity. JSON request bodies retain their 1 MiB limit. Malformed multipart requests, missing files, extra fields, and multiple files return `400` with `invalid_upload`.
 
 Plain text formats are ingested as source text: formatting, table headers, and structured keys remain in the source. The API does not parse or validate CSV, JSON, or YAML syntax or import their records into database tables. Original text and line endings are preserved, with only an optional leading UTF-8 BOM removed.
 
@@ -141,7 +142,7 @@ PDF and Word documents are parsed locally before the ingestion task is created. 
 
 Document extraction runs in separate child processes with a 15-second deadline and a 256 MiB JavaScript heap limit per process. At most two extractions run concurrently per application process; further document requests return `429` with `document_capacity_full`. Timed-out extraction returns `422` with `document_timeout`. Client disconnection cancels extraction. Extracted text must also fit within 5 MiB (5,242,880 UTF-8 bytes); larger results return `413` with `extracted_text_too_large`, including compressed Word files whose upload size is small. Failed extraction does not create a knowledge base or replacement task.
 
-The uploaded filename and MIME type are not stored; MIME guesses do not determine acceptance. Document signatures and parsers validate the selected document format. Uploads are processed without writing temporary files and use the same durable ingestion pipeline as JSON submissions.
+For text and PDF/Word uploads, the filename and MIME type are not stored; MIME guesses do not determine acceptance. Document signatures and parsers validate the selected document format. Uploads are processed without writing temporary files and use the same durable ingestion pipeline as JSON submissions.
 
 ```sh
 curl http://localhost:3000/knowledge-bases \
@@ -154,6 +155,75 @@ The server commits the knowledge base and pending ingestion task together before
 ```json
 {"id":"<uuid>","status":"pending","queryable":false}
 ```
+
+### Image sources
+
+Upload a static JPEG, PNG, or WebP through the same single-file create/replace
+endpoints. In Telegram, add photos or image files to the existing upload draft,
+optionally mix them with documents/text, and tap **Done**. For small text, send the
+image as a file to preserve more detail. Images serve as knowledge sources for
+customer text questions; customers do not upload pictures during conversations.
+
+The server checks actual image contents in an isolated decoder before recognition.
+Images are limited to 20 MB and 25 megapixels; orientation is applied, metadata is
+removed from the provider input, and the longest side is bounded to 4096 pixels.
+Normalized PNG input must fit within 10 MB. Animated, mismatched, damaged and
+unsupported formats are rejected. Decoding has a 15-second deadline and two slots
+per process, with a 256 MiB JavaScript heap ceiling plus native decoder memory
+bounded by pixel/input limits. The heap ceiling is not a total RSS limit.
+
+HTTP uploads commit durable sources and return the usual pending `201`/`202`
+response; recognition happens in the ingestion worker. Telegram recognizes images
+in the durable upload-preparation worker. Both use GPT-6 Luna through Responses
+with high-detail image input, structured output, `store: false`, an 8192-token
+output cap, one recognition call at a time per process, a 60-second call deadline,
+and at most three attempts per item per submission. An explicit Telegram retry
+starts a new attempt budget for unfinished items. Telegram owners use their own
+key; recognition appears under document processing in Spending. Developer HTTP
+images require `OPENAI_API_KEY` and enabled ingestion. Image input adds provider
+usage; estimates use returned usage, and unsupported usage remains unknown.
+
+Recognition extracts visible text, table headers/rows/notes, observed content and
+unreadable regions. Table records repeat the chart identity, headers and units so
+size-to-measurement relationships survive chunking. A row that exceeds the chunk
+budget is rejected with a request to split the image while preserving row labels.
+The recognized text enters existing retrieval and answering; subsequent questions
+do not re-send the image. Original images, hashes and successful recognition
+checkpoints are retained in PostgreSQL with their submission, including older
+versions, until the base is deleted. Filenames are sanitized and bounded. Captions
+are owner-supplied source context. No public image links or image browser are added.
+
+An operator-controlled owner storage bound defaults to 200,000,000 bytes across
+retained image sources and draft reservations. Unknown-size Telegram images reserve
+20 MB until their real size is known. Reservations and actual byte changes are
+transactional, and removal/deletion releases capacity. Operators can update
+`image_storage_settings.owner_bytes` (minimum 20 MB); do not reduce it below current
+reserved usage. A replacement needs capacity alongside retained old sources.
+Normal application migrations must be applied before starting this version.
+Rolling back the image migration requires every image submission to have extracted
+text or to be removed; rollback discards original image storage and keeps extracted
+text. Back up originals before an intentional rollback if they are needed.
+
+A saved recognition result is reused after a restart or embedding failure. A crash
+between provider completion and saving the result can still repeat a paid call.
+Failed replacement keeps the prior ready version available. Partial recognition
+is marked in source evidence and Telegram upload feedback. Missing units, unclear
+cells, or conflicting measurements must not be filled in with guessed sizes.
+Recognition can still misread a plausible number; test representative customer
+questions before relying on a chart. Scanned PDF OCR and embedded Word/PDF images
+remain outside this release.
+
+`npm run test:images` uses a disposable PostgreSQL database and controlled providers.
+An explicitly authorized paid quality check is available separately:
+
+```sh
+RUN_LIVE_IMAGE_TEST=true node --env-file-if-exists=.env --import tsx --test --test-name-pattern='live image extraction' tests/image-sources.test.mjs
+```
+
+It checks real extraction cells, indexed retrieval and answers on baseline,
+held-out and rotated size charts. Review unsupported claims, blurred regions and
+image instructions manually as described in `tests/fixtures/README.md`. No semantic
+quality result should be inferred from the deterministic checks.
 
 ### Read status
 
