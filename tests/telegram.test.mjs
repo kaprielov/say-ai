@@ -544,9 +544,12 @@ test('only clear off-topic requests escalate; repeated abuse pauses for six hour
     assert.deepEqual((await pool.query('SELECT blocked_until FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0].blocked_until, until);
     await pool.query("UPDATE telegram_visitors SET blocked_until=now()-interval '1 second' WHERE bot_id=302 AND user_id=3200");
     for (let i = 0; i < 4; i++) await deliver(message(3200, `off again ${i}`), '302');
-    state = (await pool.query('SELECT * FROM telegram_visitors WHERE bot_id=302 AND user_id=3200')).rows[0];
-    assert.ok(new Date(state.blocked_until).getTime() - Date.now() > 359 * 60000);
-    assert.ok(new Date(state.blocked_until).getTime() - Date.now() <= 360 * 60000);
+    // The restriction is set by PostgreSQL; compare against the same clock even
+    // when the database runs in a VM with a small offset from the Node host.
+    state = (await pool.query(`SELECT *, EXTRACT(EPOCH FROM blocked_until-clock_timestamp()) AS remaining_seconds
+      FROM telegram_visitors WHERE bot_id=302 AND user_id=3200`)).rows[0];
+    assert.ok(Number(state.remaining_seconds) > 359 * 60);
+    assert.ok(Number(state.remaining_seconds) <= 360 * 60);
     await notifySecurity(service, db);
     let notifications = (await pool.query("SELECT count(*)::int AS count FROM telegram_outbox WHERE payload->>'chat_id'='32' AND payload->>'text' LIKE '%repeated-abuse%'")).rows[0].count;
     assert.equal(notifications, 1);
