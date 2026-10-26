@@ -2,7 +2,7 @@
 
 Status: RAG API and a Telegram interface are implemented. The current implementation below is authoritative; the numbered sections preserve the original design discussion and may describe superseded proposals.
 
-Updated: 24 October 2026.
+Updated: 26 October 2026.
 
 ### Current implementation
 
@@ -17,6 +17,25 @@ Question answering is implemented at `POST /knowledge-bases/{id}/queries`, using
 An application-wide query admission limit rejects requests beyond three concurrent queries with `429`. A 30-second total query deadline returns `504`, attempts cancellation, and releases admission. Outstanding downstream work remains tracked after timeout, with a separate cap of six operations to bound abandoned work. Queries are not retried. Synthetic live checks have passed for a supported answer, a greeting, and a missing-information redirection; representative quality, concurrent-load latency, and ingestion freshness targets remain to be evaluated.
 
 Content replacement is implemented at `PUT /knowledge-bases/{id}/content`. It checks ownership, locks the knowledge-base row, and durably saves the complete replacement text and a pending task before returning `202`. The existing partial unique index prevents overlapping pending/processing submissions, which return `409` with `ingestion_in_progress`. Submission timestamps are recorded after acquiring the row lock. Replacement leaves the active version unchanged until the ingestion activation transaction succeeds; existing queries keep their captured version, and terminal failure preserves the previous ready version. A new submission is allowed after terminal failure. Validation, concurrent acceptance, recovery, rollback, and version availability are covered by API/database tests.
+
+### Image knowledge sources
+
+Standalone JPEG, PNG, and WebP images can be mixed with documents and text in a
+Telegram upload or submitted through the single-file HTTP API. Isolated decoding
+validates contents and dimensions before owner-funded recognition extracts text,
+tables, and unreadable regions. Image sources and successful recognition checkpoints
+are retained in PostgreSQL with their submission until base deletion; raw document
+files are not retained. Scanned PDF OCR and embedded PDF/Word images are not
+supported. See [image limits and retention](docs/reference.md#image-sources).
+
+### Catalog pilot
+
+Bots with a catalog require the visitor to select a product. Before answering,
+the service validates the current bot owner, knowledge-base binding, and visitor
+selection, then reads that product's stock and measurements from PostgreSQL.
+This path uses selected-listing evidence instead of vector retrieval. Synthetic
+stock remains explicitly marked as test data. See the
+[catalog reference](docs/reference.md#pilot-listing-catalog-storage).
 
 ### Telegram interface and ownership
 
@@ -53,7 +72,7 @@ Telegram adds these durable tables to the original knowledge-base/version/chunk/
 | Table | Purpose |
 | --- | --- |
 | `upload_drafts` | Owner-scoped file/text collection, preparation queue/retries, expiry, target base, and submitted task identity. |
-| `upload_draft_items` | Ordered Telegram document references, validated extracted text, actual byte counts, and actionable errors; raw bytes are not persisted. |
+| `upload_draft_items` | Ordered Telegram document references, validated extracted text, actual byte counts, and actionable errors; raw document bytes are not persisted. Image bytes have separate durable storage. |
 | `telegram_sessions` | Current management step, selected base, draft name, and interface language for each user. |
 | `telegram_bots` | Bot identity, owner, selected base, enabled state, AES-256-GCM encrypted token, and webhook secret. |
 | `telegram_updates` | Incoming update payload, retry state, and unique `(bot_id, update_id)` delivery identity. Completed payloads are cleared. |
@@ -64,11 +83,11 @@ Telegram adds these durable tables to the original knowledge-base/version/chunk/
 | `telegram_usage` | Independent daily admitted customer and test question counts per owner. |
 | `provider_spending` | Owner-scoped API-attempt ledger with bot/base attribution, purpose, returned token usage, versioned rates, and estimated USD; unknown costs remain explicit. Stored independently of delivery/content transactions. |
 
-Webhooks verify their secret header before parsing and acknowledge only after persisting the update. One Telegram worker holds its own advisory lock and processes updates in arrival order. Draft/session changes, outgoing replies, and update completion share a transaction. File messages accumulate in an owner-scoped draft until explicit Done. A separate worker with its own advisory lock downloads/parses one item at a time outside database transactions and persists validated text. Final task creation, notification registration, and draft submission commit atomically; completed item text is then removed. Restart recovers preparation, and failed content remains editable without partial activation. Uploads allow ten sources, 20 MB per raw file, 50 MB of raw bytes in total, and 5 MiB of UTF-8 text including separators. One open upload per owner and 100 queued/preparing jobs bound admission; idle collecting drafts expire after 24 hours. Transient processing failures receive up to three attempts; a delayed update holds later work. The outbox makes up to five delivery attempts and honors Telegram rate-limit delays. Permanent credential failures can pause the affected child without disabling other bots. PostgreSQL commits and external API calls are not atomic: a crash can duplicate message delivery or a provider call and its charges.
+Webhooks verify their secret header before parsing and acknowledge only after persisting the update. One Telegram worker holds its own advisory lock, preserves per-bot update order, and alternates eligible bots. Draft/session changes, outgoing replies, and update completion share a transaction. File messages accumulate in an owner-scoped draft until explicit Done. A separate worker with its own advisory lock downloads/parses one item at a time outside database transactions and persists validated text. Final task creation, notification registration, and draft submission commit atomically; completed item text is then removed. Restart recovers preparation, and failed content remains editable without partial activation. Uploads allow ten sources, 20 MB per raw file, 50 MB of raw bytes in total, and 5 MiB of UTF-8 text including separators. One open upload per owner and 100 queued/preparing jobs bound admission; idle collecting drafts expire after 24 hours. Transient processing failures receive up to three attempts; a delayed retry holds later work for that bot while other bots can proceed. The outbox makes up to five delivery attempts and honors Telegram rate-limit delays. Permanent credential failures can pause the affected child without disabling other bots. PostgreSQL commits and external API calls are not atomic: a crash can duplicate message delivery or a provider call and its charges.
 
-The Telegram worker is sequential; the RAG service still has its separate global query admission limit. A slow Telegram question delays other Telegram updates. Use one application instance with these workers enabled. Telegram owners can hold up to 20 bases. Owner-configurable daily customer and test quotas are independent and default to no quota; admitted provider failures count. Bot owners can configure visitor limits and off-topic escalation, with 15-minute initial and six-hour repeated-abuse pauses by default. Protection state excludes full message text; bounded dialogue memory is stored separately; only clearly off-topic validated redirections count. Repeated-abuse notifications are coalesced in the manager, which also supports unblocking. Mandatory operator controls bound HTTP work, queue depth, outgoing messages, and visitor/owner request rates; see the README for defaults. Bot scheduling preserves per-bot ordering while allowing other bots to proceed during delayed retries. These controls require load testing before their values can be treated as a capacity estimate. Ingestion has its existing retry and timeout bounds; managed Telegram bots can send bounded dialogue history to the answering model. Memory is isolated by bot, user and visitor/test scope, defaults to five pairs with a one-hour idle expiry, and is configurable or disabled in the manager. History resolves conversational references but never supplies factual evidence. HTTP queries remain stateless.
+The Telegram worker is sequential; the RAG service still has its separate global query admission limit. A slow Telegram question delays other Telegram updates. Use one application instance with these workers enabled. Telegram owners can hold up to 20 bases. Owner-configurable daily customer and test quotas are independent and default to no quota; admitted provider failures count. Bot owners can configure visitor limits and off-topic escalation, with 15-minute initial and six-hour repeated-abuse pauses by default. Protection state excludes full message text; bounded dialogue memory is stored separately; only clearly off-topic validated redirections count. Repeated-abuse notifications are coalesced in the manager, which also supports unblocking. Mandatory operator controls bound HTTP work, queue depth, outgoing messages, and visitor/owner request rates; see the development and operations reference for defaults. Bot scheduling preserves per-bot ordering while allowing other bots to proceed during delayed retries. These controls require load testing before their values can be treated as a capacity estimate. Ingestion has its existing retry and timeout bounds; managed Telegram bots can send bounded dialogue history to the answering model. Memory is isolated by bot, user and visitor/test scope, defaults to five pairs with a one-hour idle expiry, and is configurable or disabled in the manager. History resolves conversational references but never supplies factual evidence. HTTP queries remain stateless.
 
-Manager navigation uses compact inline panels with context-specific Back actions. Callback-driven panels queue `editMessageText` instead of new messages; unchanged edits complete without duplicates, and uneditable panels fall back to `sendMessage`. Messages requiring native reply keyboards still use normal sends. Spam settings are grouped with concise hints, quick values, and optional detailed help. Account controls live under Settings; data lists use five-item pages. The base picker includes the bot identity in callbacks to avoid binding through stale session context. See the README for the interaction details and reference guidance.
+Manager navigation uses compact inline panels with context-specific Back actions. Callback-driven panels queue `editMessageText` instead of new messages; unchanged edits complete without duplicates, and uneditable panels fall back to `sendMessage`. Messages requiring native reply keyboards still use normal sends. Spam settings are grouped with concise hints, quick values, and optional detailed help. Account controls live under Settings; data lists use five-item pages. The base picker includes the bot identity in callbacks to avoid binding through stale session context. See the [manager navigation reference](docs/reference.md#manager-navigation) for interaction details.
 
 ### Owner provider credentials
 
@@ -90,7 +109,7 @@ Prompts request the user's language and at most two short sentences for a redire
 
 ### Development publication and verification
 
-`npm run dev:public` starts a Cloudflare Quick Tunnel, waits for its URL and connection, then launches the backend with `TELEGRAM_PUBLIC_URL` injected into its environment. It does not rewrite `.env`. Ctrl+C stops both processes. On startup, the backend registers the manager and every stored child bot webhook with the current public URL, so restarting a temporary tunnel does not require manual URL copying or webhook updates. Webhook and token-encryption secrets remain stable in `.env`; the daily quota is optional. See [README setup](README.md#telegram-interface).
+`npm run dev:public` starts a Cloudflare Quick Tunnel, waits for its URL and connection, then launches the backend with `TELEGRAM_PUBLIC_URL` injected into its environment. It does not rewrite `.env`. Ctrl+C stops both processes. On startup, the backend registers the manager and every stored child bot webhook with the current public URL, so restarting a temporary tunnel does not require manual URL copying or webhook updates. Webhook and token-encryption secrets remain stable in `.env`; the daily quota is optional. See [Telegram setup](docs/reference.md#setup).
 
 A real development tunnel, public health endpoint, manager webhook registration, and rejection of unsigned webhook requests have been checked. A real managed bot was created and answered a store-hours question. Automated Telegram tests use controlled transports and isolated databases, including ownership, automatic activation, pause preservation, transfer, retries, and topic redirections. A synthetic live RAG check verifies supported answers and greeting/missing-information redirections. Sustained traffic, representative multilingual quality, and production availability remain unevaluated.
 

@@ -153,7 +153,7 @@ timer, automatic restart, or external notification is included. Telegram tables
 currently have no separate arrival timestamp:
 `oldest_due_seconds` is based on the current retry eligibility timestamp, not
 original queue age. Correlation IDs, phase timings, and sanitized runtime error
-reporting remain open. See [operator command details](../../README.md#pilot-operator-check).
+reporting remain open. See [operator command details](../reference.md#pilot-operator-check).
 
 ## Pilot setup and expectations
 

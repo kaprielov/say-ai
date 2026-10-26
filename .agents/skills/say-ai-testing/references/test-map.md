@@ -34,17 +34,14 @@ run every listed suite for every edit in a directory.
   created owner bases/bots; navigation uses user 40; later restrictions use bot 400.
   Use the whole Telegram file until affected fixtures are made self-contained.
   A filtered setup failure is not a valid TDD red result.
-- There is currently no aggregate `npm test` command. For a full deterministic run,
-  first satisfy the database prerequisites, then explicitly disable live opt-ins:
-
-  ```sh
-  RUN_LIVE_QUERY_TEST=false RUN_LIVE_EMBEDDING_TEST=false node --env-file-if-exists=.env --import tsx --test tests/*.test.mjs
-  ```
-
+- `npm test` runs every `tests/*.test.mjs` file after database prerequisites are met.
+  It forces `RUN_LIVE_QUERY_TEST`, `RUN_LIVE_EMBEDDING_TEST`, and
+  `RUN_LIVE_IMAGE_TEST` to `false`, overriding shell and `.env` opt-ins.
+  CI runs the same command against a fresh migrated PostgreSQL/pgvector service.
   Expect all opt-in live cases to be skipped. Check the exit status and actual
-  summary; this command is guidance, not evidence that the current suite passes.
-  Keep the live flags false for focused ingestion/query runs too, even if `.env`
-  or the shell enables them. Do not run broad checks for copy/policy-only changes.
+  summary; the command is guidance, not evidence that the current suite passes.
+  For focused runs, explicitly disable the relevant live flags as well. Do not run
+  broad checks for copy/policy-only changes.
 
 ## RAG and real Telegram evidence
 

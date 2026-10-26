@@ -28,7 +28,7 @@ Before editing a flow, trace its entry point, session transitions, feedback, and
 - [Localization](../../../src/telegram/i18n.ts) and [help copy](../../../src/telegram/guide.ts): supported languages and optional detailed guidance.
 - [Protection settings](../../../src/telegram/protection.ts): actual rule semantics, including zero values.
 - [Telegram worker](../../../src/telegram/worker.ts): durable delivery, retries, and edit recovery.
-- [Project README](../../../README.md#telegram-interface): setup and current manager behavior. Inspect nearby UI configuration modules when present.
+- [Telegram reference](../../../docs/reference.md#telegram-interface): setup and current manager behavior. Inspect nearby UI configuration modules when present.
 
 Follow the [project testing policy](../say-ai-testing/SKILL.md) to select checks and avoid redundant tests. For navigation, callback, or session changes, run the build and relevant Telegram tests with controlled transports. Cover meaningful behaviors such as returning from help to input, keeping the originating page, rejecting another owner's callbacks, custom-value validation, and edit recovery. When credential flows change, include the owner-key tests. For copy-only changes, review clarity and translation coverage without adding tests that merely duplicate wording.
 

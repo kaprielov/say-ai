@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "RUN_LIVE_QUERY_TEST=false RUN_LIVE_EMBEDDING_TEST=false RUN_LIVE_IMAGE_TEST=false node --env-file-if-exists=.env --import tsx --test tests/*.test.mjs",
     "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
     "build": "tsc",
     "start": "node --env-file-if-exists=.env dist/index.js",

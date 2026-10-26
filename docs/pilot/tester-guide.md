@@ -32,7 +32,8 @@ You do not need to prepare a formal test report.
 Allow roughly 15–20 minutes for a first session; pause and ask for help if needed.
 
 1. Open the manager, send `/start`, choose a language, and connect your API key.
-2. Create a knowledge base: give your information a name, then send text or a file.
+2. Create a knowledge base: give your information a name, then send text, documents,
+   or images. Send sources together or separately and tap **Done** when finished.
    Wait for the notification that processing is complete.
 3. Try a few questions you would actually receive from customers or participants.
    Five to ten questions is a useful starting point, not a required quota. Include
@@ -50,14 +51,20 @@ document. These are optional; completing the main flow is enough for a first tes
 
 - This is an early prototype. It may be unavailable, slow, or reset during
   development. Keep copies of your materials; do not rely on it for daily work yet.
-- A base accepts one file per upload, up to 1 MiB. Supported formats include TXT,
-  Markdown, CSV, JSON, YAML, PDF, DOCX, and DOC. Scans and image-only documents need
-  text recognition before uploading.
+- An upload accepts up to ten files or text messages: 20 MB per file, 50 MB of
+  files in total, and 5 MiB of combined extracted text. Supported formats include
+  TXT, Markdown, CSV/TSV, JSON/JSONL, YAML, PDF, DOCX, DOC, JPEG, PNG, and WebP.
+  Standalone images can supply text and tables; recognition may make mistakes.
+  Scanned PDFs and images embedded in PDF/Word documents are not recognized.
+  Send a scan as a separate supported image instead, and check the extracted facts.
 - Updating a base replaces its entire content; it does not add another document.
   Include everything you want to keep in the replacement.
-- Bots answer in private Telegram chats. Previous conversation messages are not
-  supplied to the model, so ask self-contained questions rather than relying on
-  follow-ups such as "And how much is that?"
+- Bots answer in private Telegram chats. Dialogue memory defaults to five
+  question/answer pairs and resets after 60 minutes of inactivity. Try a follow-up
+  question, then use `/reset` to start fresh. Owners can change or disable memory
+  under **My bots → a bot → Dialogue memory**. Direct knowledge-base tests are
+  stateless; use **Test bot** to try conversational behavior. Memory can add an
+  extra paid model request to resolve a follow-up question.
 - The bot is intended to use your supplied information. It can still make mistakes,
   miss information, or decline a question. Check important answers against your
   document and report invented facts or incorrect restrictions.
